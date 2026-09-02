@@ -156,6 +156,7 @@ console.log(trace.pinnedIp, trace.dnsPinned); // 本次轮询到的 IP
 
 ```bash
 npm run inspect:fetch   # 输出 pinnedIp
+npm run benchmark:kh-ips   # 对 YAML 全部 IP 测 PlanetoidMetadata 耗时（输出 benchmark/*.jsonl）
 ```
 
 ## Rocktree API

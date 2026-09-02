@@ -7,6 +7,16 @@
 
 （尚无条目。）
 
+## [0.0.7] - 2026-09-02
+
+### 新增
+
+- `npm run benchmark:kh-ips`：对 YAML 中每个 IP 探测 PlanetoidMetadata 并输出 JSONL 测速明细
+
+### 变更
+
+- （无）
+
 ## [0.0.6] - 2026-09-02
 
 ### 新增
