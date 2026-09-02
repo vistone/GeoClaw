@@ -1,17 +1,17 @@
 #!/usr/bin/env tsx
 /**
- * 预热 kh.google.com 热连接池：仅 HTTP 200 入池；403/429 后台重试直至 200。
+ * 预热 kh.google.com 热连接池：后台异步预热，HTTP 200 即入热池。
  *
  * 用法：
  *   npm run warm:kh-ips
- *   npm run warm:kh-ips -- --daemon
+ *   npm run warm:kh-ips -- --wait
  *   npm run warm:kh-ips -- --limit 100
  */
 
 import { GeoClawConfig } from "../src/core/GeoClawConfig.js";
 import { createWebFetch } from "../src/index.js";
 
-const daemon = process.argv.includes("--daemon");
+const waitAll = process.argv.includes("--wait");
 const limitArg = process.argv.find((a, i) => a === "--limit" && process.argv[i + 1]);
 const limit = limitArg ? Number(process.argv[process.argv.indexOf("--limit") + 1]) : null;
 
@@ -34,21 +34,36 @@ console.log("预热 URL:", GeoClawConfig.get().getPlanetoidMetadataUrl());
 console.log("IP 数量:", pool.getStats().total);
 console.log("");
 
-const summary = await pool.runInitialWarmup();
-console.log("首轮结果:", summary);
-console.log("当前热池:", pool.getStats());
-
+pool.startInitialWarmup();
 pool.startBackgroundReheat();
-console.log("");
-console.log("后台重加热已启动（403/429/失败 IP 直至 HTTP 200 入池）");
 
-if (daemon) {
-  console.log("守护模式：每 30s 打印统计，Ctrl+C 退出");
-  setInterval(() => {
-    console.log("[stats]", pool.getStats());
-  }, 30_000);
-} else {
-  console.log("提示：加 --daemon 保持进程与后台重加热运行");
+console.log("后台预热已启动：HTTP 200 的 IP 即时入热池，无需全部完成");
+console.log("当前热池:", pool.getStats());
+console.log("冷池 IP 数:", pool.getColdCount());
+console.log("");
+
+const statsInterval = setInterval(() => {
+  const s = pool.getStats();
+  console.log(
+    `[stats] hot=${s.hot} pending=${s.pending} warming=${s.warming} cold=${s.cold} initial=${s.initialWarmupInProgress}`,
+  );
+}, 10_000);
+
+const shutdown = () => {
+  clearInterval(statsInterval);
   pool.stopBackgroundReheat();
   pool.close();
+  process.exit(0);
+};
+
+if (waitAll) {
+  const summary = await pool.waitInitialWarmup();
+  clearInterval(statsInterval);
+  console.log("首轮全部完成:", summary);
+  console.log("当前热池:", pool.getStats());
+  shutdown();
 }
+
+console.log("保持进程运行；Ctrl+C 退出");
+console.log("提示：--wait 阻塞至全部 IP 首轮预热结束");
+process.on("SIGINT", shutdown);

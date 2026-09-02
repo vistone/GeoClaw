@@ -6,10 +6,29 @@ import type { ProxyMode } from "./FetchTypes.js";
 import { resolveProxyUrl } from "./FetchTypes.js";
 import { createHostPinPoolFromConfig, HostPinPool } from "./HostPinPool.js";
 import {
+  createHostPinRegistryFromConfig,
+  HostPinRegistry,
+  type HostPinRegistryResolve,
+} from "./HostPinRegistry.js";
+import {
+  buildFetchFlightPath,
+  type FetchFlightPath,
+  type FetchRouteOptions,
+} from "./FetchFlightPath.js";
+import {
   createHotConnectionPoolFromConfig,
   HotConnectionPool,
 } from "./HotConnectionPool.js";
 import { FetchTaskPool } from "./FetchTaskPool.js";
+import type { FetchMetrics } from "./FetchMetrics.js";
+import { createFetchMetricsFromConfig, buildIpGeoRegistryFromConfig } from "./createFetchMetricsFromConfig.js";
+import {
+  createFetchRouteResolverFromConfig,
+  FetchRouteResolver,
+} from "./FetchRouteResolver.js";
+import { parseLocString } from "./FetchFlightPath.js";
+import type { IpGeoRegistry } from "./IpGeoRegistry.js";
+import type { HostPinRecord } from "./HostPinPool.js";
 import {
   TlsFingerprintCodec,
   type TlsFingerprintConfig,
@@ -65,10 +84,11 @@ export type FetchTransportTrace = {
   proxyMode?: ProxyMode;
 };
 
-/** GET 结果：字节 + 传输追踪 */
+/** GET 结果：字节 + 传输追踪 + 飞行路线 */
 export type WebFetchResult = {
   bytes: Uint8Array;
   trace: FetchTransportTrace;
+  flightPath?: FetchFlightPath;
 };
 
 export type WebFetchGetOptions = {
@@ -103,12 +123,16 @@ export type WebFetchOptions = {
   logTransportTrace?: boolean;
   /** HostPin 池；false 关闭；省略时按 geoclaw.yaml hostPin 段 */
   hostPinPool?: HostPinPool | false;
+  /** 域名 HostPin 注册表；false 关闭；省略时自动发现 config/{hostname}.yaml */
+  hostPinRegistry?: HostPinRegistry | false;
   /** 代理 URL；false 禁用；省略时读 geoclaw.yaml proxy 段 */
   proxy?: string | false;
   /** 代理策略；省略时读 geoclaw.yaml proxy.mode */
   proxyMode?: ProxyMode;
   /** 热连接池；false 关闭；省略时按 geoclaw.yaml warmPool 段 */
   hotConnectionPool?: HotConnectionPool | false;
+  /** Fetch 指标；false 关闭；省略时按 geoclaw.yaml fetchMetrics 段 */
+  fetchMetrics?: FetchMetrics | false;
 };
 
 /**
@@ -122,26 +146,37 @@ export class WebFetch {
     Pick<WebFetchOptions, "fetch" | "tlsFingerprint" | "timeout"> & {
       tlsFingerprintCodec: TlsFingerprintCodec;
       hostPinPool?: HostPinPool;
+      hostPinRegistry?: HostPinRegistry;
+      fetchRoute: FetchRouteOptions;
+      fetchRouteResolver?: FetchRouteResolver;
       hotConnectionPool?: HotConnectionPool;
       fetchTaskPool?: FetchTaskPool;
+      fetchMetrics?: FetchMetrics;
+      ipGeoRegistry?: IpGeoRegistry;
       warmPoolFallbackToHostPin: boolean;
       proxyMode: ProxyMode;
       proxyUrl?: string;
     };
 
   /**
-   * @param options - 输入：`WebFetchOptions` — TLS 指纹、context、header 覆盖；未指定字段从 geoclaw.yaml 读取
+   * 构造实例。
+   * @param options - 输入：`WebFetchOptions` — 配置选项
+   * @returns 输出：`WebFetch` — WebFetch 实例
    */
 
   constructor(options: WebFetchOptions = {}) {
     const cfg = GeoClawConfig.get();
+    const fetchMetrics =
+      options.fetchMetrics === false
+        ? undefined
+        : (options.fetchMetrics ?? createFetchMetricsFromConfig());
     const hotConnectionPool =
       options.hotConnectionPool === false
         ? undefined
         : (options.hotConnectionPool ?? createHotConnectionPoolFromConfig());
     const fetchTaskPool =
       hotConnectionPool !== undefined
-        ? new FetchTaskPool(hotConnectionPool, cfg.getFetchTaskPoolOptions())
+        ? new FetchTaskPool(hotConnectionPool, cfg.getFetchTaskPoolOptions(), fetchMetrics)
         : undefined;
 
     this.options = {
@@ -157,8 +192,16 @@ export class WebFetch {
         options.hostPinPool === false
           ? undefined
           : (options.hostPinPool ?? createHostPinPoolFromConfig()),
+      hostPinRegistry:
+        options.hostPinRegistry === false
+          ? undefined
+          : (options.hostPinRegistry ?? createHostPinRegistryFromConfig()),
+      fetchRoute: cfg.getFetchRouteOptions(),
+      fetchRouteResolver: createFetchRouteResolverFromConfig(),
       hotConnectionPool,
       fetchTaskPool,
+      fetchMetrics,
+      ipGeoRegistry: buildIpGeoRegistryFromConfig(),
       warmPoolFallbackToHostPin: cfg.getWarmPoolFallbackToHostPin(),
       proxyMode: options.proxyMode ?? cfg.getProxyMode(),
       proxyUrl:
@@ -169,11 +212,10 @@ export class WebFetch {
   }
 
   /**
-   * GET 请求并返回响应字节（TLS 浏览器指纹由 node-wreq 原生层实现）。
-   * @param url - 输入：`string` — 完整 URL
-   * @param getOptions - 输入：`WebFetchGetOptions` — 单次 headers / tlsFingerprint 覆盖
-   * @returns 输出：`Promise<Uint8Array>` — 响应体
-   * @throws {Error} fetch 不可用或 HTTP 非 2xx
+   * 获取 Bytes。
+   * @param url - 输入：`string` — 完整 HTTP URL
+   * @param getOptions - 输入：`WebFetchGetOptions` — getOptions 参数
+   * @returns 输出：`Promise<Uint8Array>` — 异步返回 Uint8Array
    */
 
   async getBytes(url: string, getOptions: WebFetchGetOptions = {}): Promise<Uint8Array> {
@@ -182,11 +224,11 @@ export class WebFetch {
   }
 
   /**
-   * GET 请求并返回响应字节与传输层 trace（用于确认 TLS/HTTP 协议栈）。
-   * @param url - 输入：`string` — 完整 URL
-   * @param getOptions - 输入：`WebFetchGetOptions` — 单次覆盖；`trace: true` 收集 TLS 证书
-   * @returns 输出：`Promise<WebFetchResult>` — 字节与 FetchTransportTrace
-   * @throws {Error} fetch 不可用或 HTTP 非 2xx
+   * 获取 BytesWithTrace。
+   * @param url - 输入：`string` — 完整 HTTP URL
+   * @param getOptions - 输入：`WebFetchGetOptions` — getOptions 参数
+   * @returns 输出：`Promise<WebFetchResult>` — 异步返回 WebFetchResult
+   * @throws {Error} 条件不满足或 I/O 失败时
    */
 
   async getBytesWithTrace(
@@ -201,24 +243,40 @@ export class WebFetch {
         const browser = this.resolveBrowser(getOptions);
         const collectTls = getOptions.trace ?? this.options.logTransportTrace;
         const hotPool = this.options.hotConnectionPool;
-        const pinHostname = GeoClawConfig.get().getRaw().hostPin.hostname;
-        const isPinnedHost = urlHostname === pinHostname;
+        const warmHostname = GeoClawConfig.get().getRaw().hostPin.hostname;
+        const hasDomainYaml =
+          this.options.hostPinRegistry?.hasYamlForHostname(urlHostname) ??
+          urlHostname === warmHostname;
 
-        if (hotPool && isPinnedHost) {
+        if (hotPool && hasDomainYaml) {
           if (hotPool.getHotCount() > 0) {
             return this.getBytesViaHotPool(url, getOptions, extraHeaders, browser, collectTls);
           }
           if (!this.options.warmPoolFallbackToHostPin) {
+            const requestId = this.options.fetchMetrics?.createRequestId() ?? "no-hot";
+            this.options.fetchMetrics?.onRequestStart(requestId, url);
+            this.options.fetchMetrics?.onAttempt(
+              requestId,
+              url,
+              1,
+              undefined,
+              { kind: "no_hot_ip" },
+              0,
+            );
+            this.options.fetchMetrics?.onRequestFailed(requestId);
             throw new Error(
-              "HotConnectionPool: no hot connections — run warm:kh-ips or wait for background reheat",
+              "HotConnectionPool: no hot connections — wait for background warmup (warmPool.autoStartWarmup) or run warm:kh-ips",
             );
           }
         }
 
         const fetchFn = this.options.fetch ?? wreqFetch;
         const transport = fetchFn === wreqFetch ? "node-wreq" : "custom";
-        const hostPin = this.options.hostPinPool?.resolveForUrl(url);
+        const hostPin = this.resolveHostPin(url);
         const proxy = this.resolveProxy(hostPin?.pinnedIp, getOptions);
+        const requestId = this.options.fetchMetrics?.createRequestId() ?? cryptoRandomId();
+        this.options.fetchMetrics?.onRequestStart(requestId, url);
+        const coldStarted = Date.now();
 
         WebFetch.logger.debug("发起 TLS GET", {
           url,
@@ -245,11 +303,37 @@ export class WebFetch {
 
         if (!res.ok) {
           void res.arrayBuffer().catch(() => undefined);
+          const durationMs = durationFromStats(stats, coldStarted);
+          this.options.fetchMetrics?.onAttempt(
+            requestId,
+            url,
+            1,
+            hostPin?.pinnedIp,
+            { kind: "http_error", httpStatus: res.status },
+            durationMs,
+          );
+          this.options.fetchMetrics?.onRequestFailed(requestId, hostPin?.pinnedIp, res.status);
           WebFetch.logger.error("HTTP 请求失败", { status: res.status, url });
           throw new Error(`HTTP ${res.status} ${res.statusText}: ${url}`);
         }
 
         const buf = new Uint8Array(await res.arrayBuffer());
+        const durationMs = durationFromStats(stats, coldStarted);
+        this.options.fetchMetrics?.onAttempt(
+          requestId,
+          url,
+          1,
+          hostPin?.pinnedIp,
+          { kind: "success", httpStatus: res.status },
+          durationMs,
+          buf.length,
+        );
+        this.options.fetchMetrics?.onRequestSuccess(
+          requestId,
+          hostPin?.pinnedIp ?? "",
+          res.status,
+          buf.length,
+        );
         const trace = buildTransportTrace({
           url,
           transport,
@@ -279,19 +363,42 @@ export class WebFetch {
           });
         }
 
-        return { bytes: buf, trace };
+        return {
+          bytes: buf,
+          trace,
+          flightPath: await this.emitFlightPath({
+            requestId,
+            url,
+            hostPin,
+            proxy,
+            durationMs,
+            bodyBytes: buf.length,
+            httpStatus: res.status,
+            viaHot: false,
+            http2: trace.http2FingerprintEnabled && trace.likelyHttp2Response,
+          }),
+        };
       },
       { url },
     );
   }
 
   /**
-   * 返回热连接池实例（用于预热与后台重加热）。
-   * @returns 输出：`HotConnectionPool | undefined` — 已配置时返回
+   * 获取 HotConnectionPool。
+   * @returns 输出：`undefined | HotConnectionPool` — undefined | HotConnectionPool 实例
    */
 
   getHotConnectionPool(): HotConnectionPool | undefined {
     return this.options.hotConnectionPool;
+  }
+
+  /**
+   * 获取 FetchMetrics。
+   * @returns 输出：`undefined | FetchMetrics` — undefined | FetchMetrics 实例
+   */
+
+  getFetchMetrics(): FetchMetrics | undefined {
+    return this.options.fetchMetrics;
   }
 
   /**
@@ -318,7 +425,8 @@ export class WebFetch {
         ? { ...extraHeaders, ...perRequestHeaders }
         : extraHeaders;
 
-    const { response, ip, timings } = await taskPool.submit(url, merged);
+    const requestId = this.options.fetchMetrics?.createRequestId() ?? cryptoRandomId();
+    const { response, ip, timings, requestId: rid } = await taskPool.submit(url, merged, requestId);
     const proxy = this.resolveProxy(ip, getOptions);
 
     if (response.status !== GeoClawConfig.get().getWarmPoolSuccessStatus()) {
@@ -326,7 +434,13 @@ export class WebFetch {
       throw new Error(`HTTP ${response.status} ${response.statusText}: ${url}`);
     }
 
+    // 远程 RTT 优先用 wait（首字节前）；在读 body 之前取 timings，避免把下载算进去
+    const remoteTimings = timings ?? response.wreq.timings;
+    const durationMs = durationFromTimings(remoteTimings, Date.now());
     const buf = new Uint8Array(await response.arrayBuffer());
+    const urlHostname = new URL(url).hostname;
+    this.options.fetchMetrics?.addIpBytes(ip, buf.length, urlHostname);
+    const pinRecord = this.lookupPinRecord(ip);
     const trace = buildTransportTrace({
       url,
       transport: "node-wreq",
@@ -336,13 +450,33 @@ export class WebFetch {
       statusText: response.statusText,
       responseHeaders: headersToRecord(response.headers),
       bodyBytes: buf.length,
-      timings: timings ?? response.wreq.timings,
+      timings: remoteTimings,
       tlsPeer: collectTls ? response.wreq.tls : undefined,
-      requestHostname: GeoClawConfig.get().getRaw().hostPin.hostname,
+      requestHostname: urlHostname,
       pinnedIp: ip,
       dnsPinned: true,
       proxy,
       proxyMode: getOptions.proxyMode ?? this.options.proxyMode,
+    });
+
+    const flightPath = await this.emitFlightPath({
+      requestId: rid,
+      url,
+      hostPin: pinRecord
+        ? {
+            hostname: urlHostname,
+            pinnedIp: ip,
+            record: pinRecord,
+            dns: { hosts: { [urlHostname]: [ip] } },
+            yamlPath: this.options.hostPinRegistry?.resolveYamlPath(urlHostname) ?? undefined,
+          }
+        : undefined,
+      proxy,
+      durationMs,
+      bodyBytes: buf.length,
+      httpStatus: response.status,
+      viaHot: true,
+      http2: trace.http2FingerprintEnabled && trace.likelyHttp2Response,
     });
 
     if (this.options.logTransportTrace || getOptions.trace) {
@@ -357,13 +491,135 @@ export class WebFetch {
       });
     }
 
-    return { bytes: buf, trace };
+    return { bytes: buf, trace, flightPath };
   }
 
   /**
-   * 解析本次 GET 使用的 TLS 浏览器 profile。
-   * @param getOptions - 输入：`WebFetchGetOptions` — 单次覆盖
-   * @returns 输出：`TlsFingerprintConfig` — node-wreq browser 选项
+   * 解析 URL 对应 HostPin（config/{hostname}.yaml 存在则 pin，否则 undefined → 系统 DNS）。
+   * @param url - 输入：`string` — 请求 URL
+   * @returns 输出：`HostPinRegistryResolve | undefined` — HostPin 结果
+   */
+
+  private resolveHostPin(url: string): HostPinRegistryResolve | undefined {
+    const fromRegistry = this.options.hostPinRegistry?.resolveForUrl(url);
+    if (fromRegistry) {
+      return fromRegistry;
+    }
+    const legacy = this.options.hostPinPool?.resolveForUrl(url);
+    if (!legacy) {
+      return undefined;
+    }
+    return {
+      ...legacy,
+      yamlPath: GeoClawConfig.resolvePath(GeoClawConfig.get().getRaw().hostPin.ipsFile),
+    };
+  }
+
+  /**
+   * @param ip - 输入：`string` — IP 地址
+   * @returns 输出：`HostPinRecord | undefined` — geo 记录
+   */
+
+  private lookupPinRecord(ip: string): HostPinRecord | undefined {
+    const geo = this.options.ipGeoRegistry?.lookup(ip);
+    if (!geo) {
+      return undefined;
+    }
+    return {
+      ip,
+      family: ip.includes(":") ? "ipv6" : "ipv4",
+      city: geo.city,
+      region: geo.region,
+      country: geo.country,
+      loc: geo.loc,
+      org: geo.org,
+      timezone: geo.timezone,
+    };
+  }
+
+  /**
+   * 构建并记录飞行路线（origin 经 ipinfo 出口 IP 自动解析）。
+   * @param args - 输入：飞行路线参数
+   * @returns 输出：`Promise<FetchFlightPath | undefined>` — 无法解析 origin 时 undefined
+   */
+
+  private async emitFlightPath(args: {
+    requestId: string;
+    url: string;
+    hostPin?: HostPinRegistryResolve;
+    proxy?: string;
+    durationMs: number;
+    bodyBytes?: number;
+    httpStatus?: number;
+    viaHot?: boolean;
+    http2?: boolean;
+  }): Promise<FetchFlightPath | undefined> {
+    const hostname = new URL(args.url).hostname;
+    const routeOpts = this.options.fetchRoute;
+    let origin = routeOpts.origin;
+
+    if (routeOpts.originMode === "ipinfo" && this.options.fetchRouteResolver) {
+      try {
+        origin = (await this.options.fetchRouteResolver.resolveOrigin(args.proxy)) ?? origin;
+      } catch (err) {
+        WebFetch.logger.warn("ipinfo origin 解析失败", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    if (!origin) {
+      return undefined;
+    }
+
+    let pinRecord = args.hostPin?.record;
+    const pinnedIp = args.hostPin?.pinnedIp;
+
+    if (pinnedIp && !parseLocString(pinRecord?.loc) && this.options.fetchRouteResolver) {
+      try {
+        pinRecord =
+          (await this.options.fetchRouteResolver.resolveIpRecord(pinnedIp)) ?? pinRecord;
+      } catch (err) {
+        WebFetch.logger.debug("ipinfo 目标 IP 解析失败", { ip: pinnedIp, error: String(err) });
+      }
+    }
+
+    if (
+      !args.hostPin &&
+      routeOpts.ipinfoForSystemDns &&
+      this.options.fetchRouteResolver
+    ) {
+      try {
+        pinRecord = (await this.options.fetchRouteResolver.resolveHostname(hostname)) ?? undefined;
+      } catch (err) {
+        WebFetch.logger.debug("ipinfo 目标域名解析失败", { hostname, error: String(err) });
+      }
+    }
+
+    const path = buildFetchFlightPath({
+      requestId: args.requestId,
+      url: args.url,
+      targetHostname: hostname,
+      dnsMode: args.hostPin ? "hostpin" : "system",
+      ipsYaml: args.hostPin?.yamlPath,
+      pinnedIp: pinnedIp ?? pinRecord?.ip,
+      pinRecord,
+      route: { ...routeOpts, origin },
+      proxyUrl: args.proxy,
+      durationMs: args.durationMs,
+      bodyBytes: args.bodyBytes,
+      httpStatus: args.httpStatus,
+      viaHot: args.viaHot,
+      http2: args.http2,
+    });
+    this.options.fetchMetrics?.onFlightPath(path);
+    return path;
+  }
+
+  /**
+   * 执行 resolveBrowser。
+   * @param getOptions - 输入：`WebFetchGetOptions` — getOptions 参数
+   * @returns 输出：`BrowserEmulationOptions | "chrome_100" | "chrome_101" | …` — BrowserEmulationOptions | "chrome_100" | "chrome_101" | … 实例
    */
 
   resolveBrowser(getOptions: WebFetchGetOptions = {}): TlsFingerprintConfig {
@@ -373,9 +629,9 @@ export class WebFetch {
   }
 
   /**
-   * 构建本次 GET 附加请求头（context + 覆盖；profile 默认头由 node-wreq 注入）。
-   * @param getOptions - 输入：`WebFetchGetOptions` — 单次覆盖
-   * @returns 输出：`Record<string, string>` — 请求头
+   * 执行 buildHeaders。
+   * @param getOptions - 输入：`WebFetchGetOptions` — getOptions 参数
+   * @returns 输出：`Record<string, string>` — Record<string, string> 实例
    */
 
   buildHeaders(getOptions: WebFetchGetOptions = {}): Record<string, string> {
@@ -399,10 +655,10 @@ export class WebFetch {
   }
 
   /**
-   * 解析本次请求是否走 SOCKS5/HTTP 代理。
-   * @param pinnedIp - 输入：`string | undefined` — HostPin 轮询 IP
-   * @param getOptions - 输入：`WebFetchGetOptions` — 单次 proxy / proxyMode 覆盖
-   * @returns 输出：`string | undefined` — 代理 URL 或 undefined
+   * 执行 resolveProxy。
+   * @param pinnedIp - 输入：`undefined | string` — pinnedIp 参数
+   * @param getOptions - 输入：`WebFetchGetOptions` — getOptions 参数
+   * @returns 输出：`undefined | string` — undefined | string 实例
    */
 
   resolveProxy(pinnedIp?: string, getOptions: WebFetchGetOptions = {}): string | undefined {
@@ -420,8 +676,8 @@ export class WebFetch {
 let cachedWebFetch: WebFetch | undefined;
 
 /**
- * 默认 WebFetch 单例（懒加载，读取 geoclaw.yaml）。
- * @returns 输出：`WebFetch` — 默认实例
+ * 获取 WebFetch。
+ * @returns 输出：`WebFetch` — WebFetch 实例
  */
 export function getWebFetch(): WebFetch {
   cachedWebFetch ??= new WebFetch();
@@ -439,7 +695,7 @@ export const webFetch: WebFetch = new Proxy({} as WebFetch, {
 
 /**
  * 创建 WebFetch 实例。
- * @param options - 输入：`WebFetchOptions` — TLS 指纹与 header 配置
+ * @param options - 输入：`WebFetchOptions` — 配置选项
  * @returns 输出：`WebFetch` — WebFetch 实例
  */
 export function createWebFetch(options: WebFetchOptions = {}): WebFetch {
@@ -447,10 +703,10 @@ export function createWebFetch(options: WebFetchOptions = {}): WebFetch {
 }
 
 /**
- * 合并默认与单次 TLS profile 覆盖。
- * @param base - 输入：`TlsFingerprintConfig | undefined` — 实例默认 profile
- * @param override - 输入：`TlsFingerprintConfig | undefined` — 单次覆盖
- * @returns 输出：`TlsFingerprintConfig | undefined` — 合并结果
+ * 执行 mergeTlsFingerprint。
+ * @param base - 输入：`undefined | BrowserEmulationOptions | "chrome_100" | …` — 基础 URL
+ * @param override - 输入：`undefined | BrowserEmulationOptions | "chrome_100" | …` — override 参数
+ * @returns 输出：`undefined | BrowserEmulationOptions | "chrome_100" | …` — undefined | BrowserEmulationOptions | "chrome_100" | … 实例
  */
 function mergeTlsFingerprint(
   base?: TlsFingerprintConfig,
@@ -466,9 +722,9 @@ function mergeTlsFingerprint(
 }
 
 /**
- * 从 node-wreq 响应组装 FetchTransportTrace。
- * @param args - 输入：`object` — url、browser、status、responseHeaders、timings、tlsPeer
- * @returns 输出：`FetchTransportTrace` — 传输层追踪对象
+ * 执行 buildTransportTrace。
+ * @param args - 输入：`object` — 请求参数
+ * @returns 输出：`FetchTransportTrace` — FetchTransportTrace 实例
  */
 function buildTransportTrace(args: {
   url: string;
@@ -520,9 +776,9 @@ function buildTransportTrace(args: {
 }
 
 /**
- * 判断 browser profile 是否启用 HTTP/2 指纹。
- * @param browser - 输入：`TlsFingerprintConfig` — node-wreq browser 选项
- * @returns 输出：`boolean` — true 表示配置 ALPN/h2 指纹
+ * 判断 Http2FingerprintEnabled。
+ * @param browser - 输入：`BrowserEmulationOptions | "chrome_100" | "chrome_101" | …` — browser 参数
+ * @returns 输出：`boolean` — 条件成立返回 true，否则 false
  */
 function isHttp2FingerprintEnabled(browser: TlsFingerprintConfig): boolean {
   if (typeof browser === "string") return true;
@@ -530,9 +786,9 @@ function isHttp2FingerprintEnabled(browser: TlsFingerprintConfig): boolean {
 }
 
 /**
- * 判断 browser profile 是否注入默认浏览器头。
- * @param browser - 输入：`TlsFingerprintConfig` — node-wreq browser 选项
- * @returns 输出：`boolean` — true 表示使用 profile 默认头顺序
+ * 判断 ProfileHeadersEnabled。
+ * @param browser - 输入：`BrowserEmulationOptions | "chrome_100" | "chrome_101" | …` — browser 参数
+ * @returns 输出：`boolean` — 条件成立返回 true，否则 false
  */
 function isProfileHeadersEnabled(browser: TlsFingerprintConfig): boolean {
   if (typeof browser === "string") return true;
@@ -540,9 +796,9 @@ function isProfileHeadersEnabled(browser: TlsFingerprintConfig): boolean {
 }
 
 /**
- * 将 Headers 转为普通对象。
- * @param headers - 输入：`Headers` — node-wreq 响应头
- * @returns 输出：`Record<string, string>` — 键值对
+ * 执行 headersToRecord。
+ * @param headers - 输入：`object` — headers 参数
+ * @returns 输出：`Record<string, string>` — Record<string, string> 实例
  */
 function headersToRecord(headers: { entries(): IterableIterator<[string, string]> }): Record<string, string> {
   const out: Record<string, string> = {};
@@ -550,4 +806,42 @@ function headersToRecord(headers: { entries(): IterableIterator<[string, string]
     out[key] = value;
   }
   return out;
+}
+
+/**
+ * 执行 durationFromStats。
+ * @param stats - 输入：`undefined | RequestStats` — stats 参数
+ * @param fallbackStart - 输入：`number` — fallbackStart 参数
+ * @returns 输出：`number` — 数值结果
+ */
+function durationFromStats(stats: RequestStats | undefined, fallbackStart: number): number {
+  return durationFromTimings(stats?.timings, fallbackStart);
+}
+
+/**
+ * 执行 durationFromTimings。
+ * @param timings - 输入：`undefined | RequestTimings` — timings 参数
+ * @param fallbackStart - 输入：`number` — fallbackStart 参数
+ * @returns 输出：`number` — 数值结果
+ */
+function durationFromTimings(
+  timings: import("node-wreq").RequestTimings | undefined,
+  fallbackStart: number,
+): number {
+  // 优先 wait：到首字节的远程等待，不含本地下载/排队/路径解析
+  if (timings?.wait !== undefined) {
+    return Math.round(timings.wait);
+  }
+  if (timings?.total !== undefined) {
+    return Math.round(timings.total);
+  }
+  return Date.now() - fallbackStart;
+}
+
+/**
+ * 执行 cryptoRandomId。
+ * @returns 输出：`string` — 字符串结果
+ */
+function cryptoRandomId(): string {
+  return `req-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }

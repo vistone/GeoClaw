@@ -27,6 +27,7 @@ hostPin:
   enabled: true
   hostname: kh.google.com
   ipsFile: test/fixtures/kh.test-ips.yaml
+  configDir: config
   family: all
 
 benchmark:
@@ -42,7 +43,9 @@ warmPool:
   poolIdleTimeout: false
   poolMaxIdlePerHost: 1
   deniedStatuses: [403, 429]
+  coldPoolStatuses: [403, 429]
   successStatus: 200
+  autoStartWarmup: false
   initialConcurrency: 2
   reheatConcurrency: 1
   reheatIntervalMs: 5000
@@ -51,3 +54,47 @@ warmPool:
   fallbackToHostPin: true
   taskConcurrency: 2
   maxTaskAttempts: null
+
+fetchMetrics:
+  enabled: true
+  logEachAttempt: false
+  summaryIntervalMs: 0
+  maxRecentAttempts: 100
+  maxRecentRequests: 50
+  maxRecentFlightPaths: 50
+  ipStatsDir: null
+  ipStatsFlushIntervalMs: 0
+  ipStatsSeedFromHostPin: false
+
+fetchRoute:
+  originMode: manual
+  origin:
+    lat: 39.9042
+    lng: 116.4074
+    city: Beijing
+    country: CN
+    label: client
+  includeProxyHop: false
+  ipinfoForSystemDns: false
+
+ipinfo:
+  enabled: false
+  token: null
+  baseUrl: https://ipinfo.io
+  cacheTtlMs: 60000
+  timeoutMs: 3000
+  originViaProxy: false
+
+flightMap:
+  host: 127.0.0.1
+  port: 8765
+  tileProvider: bing
+  bingImagerySet: Road
+  bingMapsKey: null
+  geojsonIoUrl: https://geojson.io
+  leoAltitudeMinKm: 12
+  leoAltitudeMaxKm: 48
+  orbitDisplayExaggeration: 2.5
+  pollIntervalMs: 5000
+  demoFetchOnStart: false
+  demoFetchUrl: null

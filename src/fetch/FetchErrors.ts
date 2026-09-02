@@ -4,8 +4,10 @@ export class HotFetchNotOkError extends Error {
   readonly ip: string;
 
   /**
-   * @param status - 输入：`number` — HTTP 状态码
-   * @param ip - 输入：`string` — 使用的 IP
+   * 构造实例。
+   * @param status - 输入：`number` — status 参数
+   * @param ip - 输入：`string` — ip 参数
+   * @returns 输出：`HotFetchNotOkError` — HotFetchNotOkError 实例
    */
 
   constructor(status: number, ip: string) {
@@ -21,8 +23,10 @@ export class HotFetchTransportError extends Error {
   readonly ip: string;
 
   /**
-   * @param ip - 输入：`string` — 使用的 IP
-   * @param cause - 输入：`unknown` — 原始错误
+   * 构造实例。
+   * @param ip - 输入：`string` — ip 参数
+   * @param cause - 输入：`unknown` — cause 参数
+   * @returns 输出：`HotFetchTransportError` — HotFetchTransportError 实例
    */
 
   constructor(ip: string, cause: unknown) {
@@ -32,10 +36,30 @@ export class HotFetchTransportError extends Error {
   }
 }
 
+/**
+ * 单次请求超时（非致命）：热连接保留，任务应回队换 IP，不计入错误踢池。
+ */
+export class HotFetchTimeoutError extends Error {
+  readonly ip: string;
+
+  /**
+   * 构造实例。
+   * @param ip - 输入：`string` — ip 参数
+   * @param cause - 输入：`unknown` — cause 参数
+   * @returns 输出：`HotFetchTimeoutError` — HotFetchTimeoutError 实例
+   */constructor(ip: string, cause?: unknown) {
+    const detail = cause instanceof Error ? cause.message : cause != null ? String(cause) : "timeout";
+    super(`timeout via hot IP ${ip}: ${detail}`);
+    this.name = "HotFetchTimeoutError";
+    this.ip = ip;
+  }
+}
+
 /** 当前无可用热连接（任务应回队等待后台重加热） */
 export class HotFetchNoHotIpError extends Error {
   /**
-   * @returns 输出：`HotFetchNoHotIpError` — 错误实例
+   * 构造实例。
+   * @returns 输出：`HotFetchNoHotIpError` — HotFetchNoHotIpError 实例
    */
 
   constructor() {
@@ -47,9 +71,10 @@ export class HotFetchNoHotIpError extends Error {
 /** 任务超过最大尝试次数 */
 export class FetchTaskMaxAttemptsError extends Error {
   /**
-   * @param url - 输入：`string` — 请求 URL
-   * @param attempts - 输入：`number` — 上限次数
-   * @returns 输出：`FetchTaskMaxAttemptsError` — 错误实例
+   * 构造实例。
+   * @param url - 输入：`string` — 完整 HTTP URL
+   * @param attempts - 输入：`number` — attempts 参数
+   * @returns 输出：`FetchTaskMaxAttemptsError` — FetchTaskMaxAttemptsError 实例
    */
 
   constructor(url: string, attempts: number) {
@@ -59,14 +84,15 @@ export class FetchTaskMaxAttemptsError extends Error {
 }
 
 /**
- * 可重新入队的 fetch 失败（非 200 / 无热 IP / 传输错误）。
- * @param err - 输入：`unknown` — 捕获的错误
- * @returns 输出：`boolean` — true 表示应回队
+ * 判断 FetchRequeueError。
+ * @param err - 输入：`unknown` — 错误对象
+ * @returns 输出：`boolean` — 条件成立返回 true，否则 false
  */
 export function isFetchRequeueError(err: unknown): boolean {
   return (
     err instanceof HotFetchNotOkError ||
     err instanceof HotFetchTransportError ||
+    err instanceof HotFetchTimeoutError ||
     err instanceof HotFetchNoHotIpError
   );
 }

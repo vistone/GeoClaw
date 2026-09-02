@@ -3,3 +3,7 @@ dist/
 benchmark/
 *.log
 .DS_Store
+
+# 按域名的运行时 IP 请求统计
+config/ip-stats/*.yaml
+config/ip-stats/*.yml

@@ -42,7 +42,12 @@ test("WebFetch IPv6 HostPin live via SOCKS5", async () => {
     hostname: "kh.google.com",
     ips: ["2404:6800:4000:1006::5b"],
   });
-  const wf = createWebFetch({ hostPinPool: pool, proxyMode: "auto" });
+  const wf = createWebFetch({
+    hostPinPool: pool,
+    hostPinRegistry: false,
+    hotConnectionPool: false,
+    proxyMode: "auto",
+  });
   const { bytes, trace } = await wf.getBytesWithTrace(
     "https://kh.google.com/rt/earth/PlanetoidMetadata",
     { trace: true },

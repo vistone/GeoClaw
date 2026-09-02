@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GeoClaw · 请求脉冲航线</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+    <link href="/styles.css" rel="stylesheet" />
+  </head>
+  <body>
+    <div id="map"></div>
+    <aside id="panel">
+      <header>
+        <h1>请求脉冲航线</h1>
+        <p id="status">连接 WebSocket…</p>
+      </header>
+      <section>
+        <label for="fetch-url">触发请求 URL</label>
+        <input id="fetch-url" type="url" spellcheck="false" />
+        <button id="btn-fetch" type="button">发起 Fetch</button>
+        <button id="btn-stress" type="button" class="secondary">高并发压测</button>
+      </section>
+      <section id="stats"></section>
+      <section id="ip-stats">
+        <h2>IP 请求统计</h2>
+        <p id="ip-stats-domain" class="muted"></p>
+        <p id="ip-stats-summary" class="muted">等待数据…</p>
+        <button id="btn-reset-ip-stats" type="button" class="secondary">重置统计</button>
+        <div class="ip-stats-table-wrap">
+          <table id="ip-stats-table">
+            <thead>
+              <tr>
+                <th>族</th>
+                <th>IP</th>
+                <th>请求</th>
+                <th>成功</th>
+                <th>失败</th>
+                <th>字节</th>
+                <th>均耗时</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+      <ul id="route-list"></ul>
+    </aside>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -13,7 +13,8 @@ fetch:
     Referer: https://earth.google.com/
   forceIdentityEncoding: true
   logTransportTrace: false
-  timeoutMs: null
+  # 热池/业务请求超时（毫秒）；超时不踢热连接，任务回队换 IP
+  timeoutMs: 2000
 
 tls:
   profile: chrome_128
@@ -30,6 +31,7 @@ hostPin:
   enabled: true
   hostname: kh.google.com
   ipsFile: config/kh.google.com.yaml
+  configDir: config
   family: all
 
 benchmark:
@@ -45,12 +47,71 @@ warmPool:
   poolIdleTimeout: false
   poolMaxIdlePerHost: 1
   deniedStatuses: [403, 429]
+  coldPoolStatuses: [403, 429]
   successStatus: 200
-  initialConcurrency: 20
-  reheatConcurrency: 5
-  reheatIntervalMs: 10000
+  autoStartWarmup: true
+  # 首轮批量并发预热：同时最多 N 个 IP 在预热（非逐条串行）
+  initialConcurrency: 200
+  # 冷池/失败 IP 每轮重预热批次大小
+  reheatConcurrency: 50
+  reheatIntervalMs: 5000
   reheatBackoffMs: 30000
   deniedBackoffMs: 60000
   fallbackToHostPin: false
   taskConcurrency: 50
   maxTaskAttempts: null
+  # 统一空闲窗口：选路优先派给快过期热连接续命；空闲达 75% 窗口时轻量保活（0 关闭）
+  idleExpireMs: 60000
+  keepAliveConcurrency: 20
+
+fetchMetrics:
+  enabled: true
+  logEachAttempt: false
+  summaryIntervalMs: 30000
+  maxRecentAttempts: 1000
+  maxRecentRequests: 500
+  maxRecentFlightPaths: 500
+  # 按域名分文件的 IP 请求统计（常驻）：config/ip-stats/<hostname>.yaml
+  ipStatsDir: config/ip-stats
+  ipStatsFlushIntervalMs: 5000
+  ipStatsSeedFromHostPin: true
+
+fetchRoute:
+  originMode: ipinfo
+  origin: null
+  ipinfoForSystemDns: true
+
+ipinfo:
+  enabled: true
+  # 勿把真实 token 提交进仓库；可用环境变量 IPINFO_TOKEN 覆盖
+  token: null
+  baseUrl: https://ipinfo.io
+  cacheTtlMs: 3600000
+  timeoutMs: 5000
+  originViaProxy: false
+
+flightMap:
+  host: 127.0.0.1
+  port: 8765
+  # Bing Maps 底图（Road / Aerial / AerialWithLabels）
+  tileProvider: bing
+  bingImagerySet: Road
+  # 可选；也可用环境变量 BING_MAPS_KEY
+  bingMapsKey: null
+  geojsonIoUrl: https://geojson.io
+  pollIntervalMs: 3000
+  demoFetchOnStart: true
+  demoFetchUrl: null
+  # 弹道弧显示高度（地图拱高用，非真实 LEO）
+  earthRadiusKm: 6371
+  leoAltitudeMinKm: 12
+  leoAltitudeMaxKm: 48
+  orbitDisplayExaggeration: 2.5
+  # 请求脉冲：绘出 → 停留 → 淡出（不画满热池）
+  routeDrawMs: 1400
+  routeHoldMs: 500
+  routeFadeMs: 2800
+  # 高并发：轮询热池 IP 发请求，压前端脉冲绘制
+  stressConcurrency: 500
+  stressTotal: null
+  stressOnStart: false

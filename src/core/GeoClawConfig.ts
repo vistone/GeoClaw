@@ -9,6 +9,8 @@ import { setGlobalLogLevel, LogLevel, logLevelFromString } from "./LogConfig.js"
 import type { HostPinPoolOptions } from "../fetch/HostPinPool.js";
 import { loadHostPinRecordsFromYaml } from "../fetch/HostPinPool.js";
 import type { HotConnectionPoolOptions } from "../fetch/HotConnectionPool.js";
+import type { FetchRouteOptions } from "../fetch/FetchFlightPath.js";
+import type { FetchMetricsOptions } from "../fetch/FetchMetrics.js";
 import type { ProxyMode } from "../fetch/FetchTypes.js";
 
 /** config/geoclaw.yaml 文件结构 */
@@ -31,11 +33,20 @@ export type GeoClawConfigFile = {
     enabled: boolean;
     url: string;
     mode: ProxyMode;
+  /** 可选；已废弃用于航线可视化，勿再配置 */
+    geo?: {
+      lat: number;
+      lng: number;
+      city?: string;
+      country?: string;
+      label?: string;
+    } | null;
   };
   hostPin: {
     enabled: boolean;
     hostname: string;
     ipsFile: string;
+    configDir: string;
     family: "all" | "ipv4" | "ipv6";
   };
   benchmark: {
@@ -51,7 +62,9 @@ export type GeoClawConfigFile = {
     poolIdleTimeout: number | false | null;
     poolMaxIdlePerHost: number;
     deniedStatuses: number[];
+    coldPoolStatuses: number[] | null;
     successStatus: number;
+    autoStartWarmup: boolean;
     initialConcurrency: number;
     reheatConcurrency: number;
     reheatIntervalMs: number;
@@ -60,6 +73,84 @@ export type GeoClawConfigFile = {
     fallbackToHostPin: boolean;
     taskConcurrency: number;
     maxTaskAttempts: number | null;
+  /** 估计服务端空闲超时；选路优先快过期 + 末段保活；省略默认 60000；0 关闭 */
+    idleExpireMs?: number;
+  /** @deprecated 请用 idleExpireMs；若仍配置则作为 idleExpireMs 回退 */
+    keepAliveIdleMs?: number;
+  /** 每轮保活最大并发；省略默认 20 */
+    keepAliveConcurrency?: number;
+  };
+  fetchMetrics: {
+    enabled: boolean;
+    logEachAttempt: boolean;
+    summaryIntervalMs: number;
+    maxRecentAttempts: number;
+    maxRecentRequests: number;
+    maxRecentFlightPaths: number;
+  /** 按域名分文件的 IP 统计目录（如 config/ip-stats） */
+    ipStatsDir?: string | null;
+  /** @deprecated 已改为 ipStatsDir */
+    ipStatsFile?: string | null;
+    ipStatsFlushIntervalMs?: number;
+    ipStatsSeedFromHostPin?: boolean;
+  };
+  fetchRoute: {
+    originMode: "ipinfo" | "manual";
+    origin: {
+      lat: number;
+      lng: number;
+      city?: string;
+      region?: string;
+      country?: string;
+      label?: string;
+    } | null;
+    includeProxyHop?: boolean;
+    ipinfoForSystemDns: boolean;
+  };
+  ipinfo: {
+    enabled: boolean;
+    token: string | null;
+    baseUrl: string;
+    cacheTtlMs: number;
+    timeoutMs: number;
+    originViaProxy: boolean;
+  };
+  flightMap: {
+    host: string;
+    port: number;
+  /** @deprecated 使用 tileUrl / tileProvider */
+    mapStyleUrl: string;
+    tileUrl: string;
+  /** 底图：bing | custom（custom 时用 tileUrl） */
+    tileProvider: "bing" | "custom";
+  /** Bing 样式：Road | Aerial | AerialWithLabels */
+    bingImagerySet: "Road" | "Aerial" | "AerialWithLabels";
+  /** 可选；有 key 时走官方 Metadata API */
+    bingMapsKey: string | null;
+    geojsonIoUrl: string;
+    pollIntervalMs: number;
+    demoFetchOnStart: boolean;
+    demoFetchUrl: string | null;
+  /** 地球半径 (km)，用于 LEO 轨道弧计算 */
+    earthRadiusKm: number;
+  /** LEO 轨道高度下限 (km) */
+    leoAltitudeMinKm: number;
+  /** LEO 轨道高度上限 (km) */
+    leoAltitudeMaxKm: number;
+  /**
+     * 平面地图显示夸张系数。
+     * 真实 LEO 相对地表的几何仰角很小，需放大才有卫星轨道空间感。
+   */
+    orbitDisplayExaggeration: number;
+    routeDrawMs?: number;
+    routeHoldMs?: number;
+    routeFadeMs?: number;
+  /** 高并发压测：并发数 */
+    stressConcurrency?: number;
+  /** 高并发压测：总请求数；null=按热池 IP 数 */
+    stressTotal?: number | null;
+  /** 启动后热池就绪自动跑一轮压测 */
+    stressOnStart?: boolean;
   };
 };
 
@@ -81,9 +172,9 @@ export class GeoClawConfig {
   }
 
   /**
-   * 加载配置；重复调用返回同一实例，除非先 reset。
-   * @param configPath - 输入：`string | undefined` — YAML 路径；默认 GEOCLAW_CONFIG 或 config/geoclaw.yaml
-   * @returns 输出：`GeoClawConfig` — 配置单例
+   * 执行 load。
+   * @param configPath - 输入：`undefined | string` — configPath 参数
+   * @returns 输出：`GeoClawConfig` — GeoClawConfig 实例
    */
 
   static load(configPath?: string): GeoClawConfig {
@@ -100,8 +191,8 @@ export class GeoClawConfig {
   }
 
   /**
-   * 获取已加载配置；未加载时自动 load。
-   * @returns 输出：`GeoClawConfig` — 配置单例
+   * 获取。
+   * @returns 输出：`GeoClawConfig` — GeoClawConfig 实例
    */
 
   static get(): GeoClawConfig {
@@ -109,7 +200,7 @@ export class GeoClawConfig {
   }
 
   /**
-   * 测试用：清空单例。
+   * 执行 reset。
    * @returns 输出：无（`void`）
    */
 
@@ -118,8 +209,8 @@ export class GeoClawConfig {
   }
 
   /**
-   * 配置文件绝对路径。
-   * @returns 输出：`string` — geoclaw.yaml 路径
+   * 获取 ConfigPath。
+   * @returns 输出：`string` — 字符串结果
    */
 
   getConfigPath(): string {
@@ -127,8 +218,8 @@ export class GeoClawConfig {
   }
 
   /**
-   * 原始 YAML 对象（只读引用）。
-   * @returns 输出：`GeoClawConfigFile` — 配置对象
+   * 获取 Raw。
+   * @returns 输出：`Readonly<GeoClawConfigFile>` — Readonly<GeoClawConfigFile> 实例
    */
 
   getRaw(): Readonly<GeoClawConfigFile> {
@@ -136,8 +227,8 @@ export class GeoClawConfig {
   }
 
   /**
-   * 日志级别。
-   * @returns 输出：`LogLevel` — 来自 YAML log.level
+   * 获取 LogLevel。
+   * @returns 输出：`DEBUG | INFO | WARN | …` — DEBUG | INFO | WARN | … 实例
    */
 
   getLogLevel(): LogLevel {
@@ -145,8 +236,8 @@ export class GeoClawConfig {
   }
 
   /**
-   * Rocktree API baseUrl。
-   * @returns 输出：`string` — rocktree.baseUrl
+   * 获取 RocktreeBaseUrl。
+   * @returns 输出：`string` — 字符串结果
    */
 
   getRocktreeBaseUrl(): string {
@@ -154,8 +245,8 @@ export class GeoClawConfig {
   }
 
   /**
-   * PlanetoidMetadata 完整 URL。
-   * @returns 输出：`string` — baseUrl + planetoidPath
+   * 获取 PlanetoidMetadataUrl。
+   * @returns 输出：`string` — 字符串结果
    */
 
   getPlanetoidMetadataUrl(): string {
@@ -163,8 +254,8 @@ export class GeoClawConfig {
   }
 
   /**
-   * fetch 上下文请求头。
-   * @returns 输出：`Record<string, string>` — fetch.contextHeaders
+   * 获取 ContextHeaders。
+   * @returns 输出：`Record<string, string>` — Record<string, string> 实例
    */
 
   getContextHeaders(): Record<string, string> {
@@ -172,8 +263,8 @@ export class GeoClawConfig {
   }
 
   /**
-   * 是否强制 Accept-Encoding: identity。
-   * @returns 输出：`boolean` — fetch.forceIdentityEncoding
+   * 获取 ForceIdentityEncoding。
+   * @returns 输出：`boolean` — 布尔结果
    */
 
   getForceIdentityEncoding(): boolean {
@@ -181,8 +272,8 @@ export class GeoClawConfig {
   }
 
   /**
-   * 默认是否打印传输 trace。
-   * @returns 输出：`boolean` — fetch.logTransportTrace
+   * 获取 LogTransportTrace。
+   * @returns 输出：`boolean` — 布尔结果
    */
 
   getLogTransportTrace(): boolean {
@@ -190,8 +281,8 @@ export class GeoClawConfig {
   }
 
   /**
-   * 默认请求超时（毫秒）；null 表示不设置。
-   * @returns 输出：`number | undefined` — fetch.timeoutMs
+   * 获取 FetchTimeoutMs。
+   * @returns 输出：`undefined | number` — undefined | number 实例
    */
 
   getFetchTimeoutMs(): number | undefined {
@@ -200,8 +291,8 @@ export class GeoClawConfig {
   }
 
   /**
-   * TLS 浏览器 profile（node-wreq）。
-   * @returns 输出：`BrowserEmulationOptions` — tls 段
+   * 获取 TlsFingerprint。
+   * @returns 输出：`BrowserEmulationOptions` — BrowserEmulationOptions 实例
    */
 
   getTlsFingerprint(): BrowserEmulationOptions {
@@ -214,8 +305,8 @@ export class GeoClawConfig {
   }
 
   /**
-   * 代理 URL；未启用时 undefined。
-   * @returns 输出：`string | undefined` — proxy.url
+   * 获取 ProxyUrl。
+   * @returns 输出：`undefined | string` — undefined | string 实例
    */
 
   getProxyUrl(): string | undefined {
@@ -223,8 +314,8 @@ export class GeoClawConfig {
   }
 
   /**
-   * 代理策略。
-   * @returns 输出：`ProxyMode` — proxy.mode
+   * 获取 ProxyMode。
+   * @returns 输出：`"auto" | "always" | "never"` — "auto" | "always" | "never" 实例
    */
 
   getProxyMode(): ProxyMode {
@@ -232,8 +323,8 @@ export class GeoClawConfig {
   }
 
   /**
-   * HostPin 池选项；未启用时 null。
-   * @returns 输出：`HostPinPoolOptions | null` — hostPin 段
+   * 获取 HostPinPoolOptions。
+   * @returns 输出：`null | HostPinPoolOptions` — null | HostPinPoolOptions 实例
    */
 
   getHostPinPoolOptions(): HostPinPoolOptions | null {
@@ -248,8 +339,106 @@ export class GeoClawConfig {
   }
 
   /**
-   * benchmark 段配置。
-   * @returns 输出：`GeoClawConfigFile["benchmark"]` — 测速默认值
+   * 获取 HostPinConfigDir。
+   * @returns 输出：`string` — 字符串结果
+   */
+
+  getHostPinConfigDir(): string {
+    return this.file.hostPin?.configDir ?? "config";
+  }
+
+  /**
+   * 获取 FetchRouteOptions。
+   * @returns 输出：`FetchRouteOptions` — FetchRouteOptions 实例
+   */
+
+  getFetchRouteOptions(): FetchRouteOptions {
+    const route = this.file.fetchRoute;
+    const proxyGeo = this.file.proxy?.geo ?? null;
+    const originMode = route?.originMode ?? "ipinfo";
+    return {
+      originMode,
+      origin: originMode === "manual" ? (route?.origin ?? null) : null,
+      includeProxyHop: route?.includeProxyHop ?? false,
+      ipinfoForSystemDns: route?.ipinfoForSystemDns ?? true,
+      proxyGeo: proxyGeo
+        ? {
+            lat: proxyGeo.lat,
+            lng: proxyGeo.lng,
+            city: proxyGeo.city,
+            country: proxyGeo.country,
+            label: proxyGeo.label,
+          }
+        : null,
+    };
+  }
+
+  /**
+   * 获取 IpInfoOptions。
+   * @returns 输出：`null | object` — null | object 实例
+   */
+
+  getIpInfoOptions(): {
+    enabled: boolean;
+    token: string | null;
+    baseUrl: string;
+    cacheTtlMs: number;
+    timeoutMs: number;
+    originViaProxy: boolean;
+  } | null {
+    const info = this.file.ipinfo;
+    if (!info) {
+      return null;
+    }
+    const token = process.env.IPINFO_TOKEN ?? info.token ?? null;
+    return {
+      enabled: info.enabled,
+      token,
+      baseUrl: info.baseUrl ?? "https://ipinfo.io",
+      cacheTtlMs: info.cacheTtlMs ?? 3_600_000,
+      timeoutMs: info.timeoutMs ?? 5000,
+      originViaProxy: info.originViaProxy ?? false,
+    };
+  }
+
+  /**
+   * 获取 FlightMapConfig。
+   * @returns 输出：`object` — object 实例
+   */
+
+  getFlightMapConfig(): GeoClawConfigFile["flightMap"] {
+    const m = this.file.flightMap;
+    const planetoid = joinUrl(this.file.rocktree.baseUrl, this.file.benchmark.planetoidPath);
+    const defaultTile = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+    const bingKey = process.env.BING_MAPS_KEY?.trim() || m?.bingMapsKey || null;
+    return {
+      host: m?.host ?? "127.0.0.1",
+      port: m?.port ?? 8765,
+      mapStyleUrl: m?.mapStyleUrl ?? "https://demotiles.maplibre.org/style.json",
+      tileUrl: m?.tileUrl ?? defaultTile,
+      tileProvider: m?.tileProvider ?? "bing",
+      bingImagerySet: m?.bingImagerySet ?? "Road",
+      bingMapsKey: bingKey,
+      geojsonIoUrl: m?.geojsonIoUrl ?? "https://geojson.io",
+      pollIntervalMs: m?.pollIntervalMs ?? 3000,
+      demoFetchOnStart: m?.demoFetchOnStart ?? true,
+      demoFetchUrl: m?.demoFetchUrl ?? planetoid,
+      earthRadiusKm: m?.earthRadiusKm ?? 6371,
+      leoAltitudeMinKm: m?.leoAltitudeMinKm ?? 12,
+      leoAltitudeMaxKm: m?.leoAltitudeMaxKm ?? 48,
+      orbitDisplayExaggeration: m?.orbitDisplayExaggeration ?? 2.5,
+      routeDrawMs: m?.routeDrawMs ?? 1400,
+      routeHoldMs: m?.routeHoldMs ?? 500,
+      routeFadeMs: m?.routeFadeMs ?? 2800,
+      stressConcurrency: m?.stressConcurrency ?? 40,
+      stressTotal: m?.stressTotal ?? null,
+      stressOnStart: m?.stressOnStart ?? false,
+    };
+  }
+
+  /**
+   * 获取 BenchmarkConfig。
+   * @returns 输出：`object` — object 实例
    */
 
   getBenchmarkConfig(): GeoClawConfigFile["benchmark"] {
@@ -257,8 +446,8 @@ export class GeoClawConfig {
   }
 
   /**
-   * 热连接池选项；未启用时 null。
-   * @returns 输出：`HotConnectionPoolOptions | null` — warmPool 段
+   * 获取 WarmPoolOptions。
+   * @returns 输出：`null | HotConnectionPoolOptions` — null | HotConnectionPoolOptions 实例
    */
 
   getWarmPoolOptions(): HotConnectionPoolOptions | null {
@@ -298,12 +487,16 @@ export class GeoClawConfig {
       reheatIntervalMs: warm.reheatIntervalMs,
       reheatBackoffMs: warm.reheatBackoffMs,
       deniedBackoffMs: warm.deniedBackoffMs,
+      coldPoolStatuses: warm.coldPoolStatuses ?? warm.deniedStatuses,
+      autoStartWarmup: warm.autoStartWarmup,
+      idleExpireMs: warm.idleExpireMs ?? warm.keepAliveIdleMs ?? 60_000,
+      keepAliveConcurrency: warm.keepAliveConcurrency ?? 20,
     };
   }
 
   /**
-   * warmPool 是否允许无热连接时回退 HostPin 冷请求。
-   * @returns 输出：`boolean` — fallbackToHostPin
+   * 获取 WarmPoolFallbackToHostPin。
+   * @returns 输出：`boolean` — 布尔结果
    */
 
   getWarmPoolFallbackToHostPin(): boolean {
@@ -311,8 +504,8 @@ export class GeoClawConfig {
   }
 
   /**
-   * FetchTaskPool 并发与重试上限。
-   * @returns 输出：`{ concurrency, maxAttempts }` — 任务池配置
+   * 获取 FetchTaskPoolOptions。
+   * @returns 输出：`object` — object 实例
    */
 
   getFetchTaskPoolOptions(): { concurrency: number; maxAttempts: number | null } {
@@ -324,8 +517,8 @@ export class GeoClawConfig {
   }
 
   /**
-   * 热池 / fetch 成功 HTTP 状态码。
-   * @returns 输出：`number` — 通常 200
+   * 获取 WarmPoolSuccessStatus。
+   * @returns 输出：`number` — 数值结果
    */
 
   getWarmPoolSuccessStatus(): number {
@@ -333,9 +526,29 @@ export class GeoClawConfig {
   }
 
   /**
-   * 解析相对/绝对路径为绝对路径（相对项目根）。
-   * @param relOrAbs - 输入：`string` — 配置中的路径
-   * @returns 输出：`string` — 绝对路径
+   * 获取 FetchMetricsOptions。
+   * @returns 输出：`FetchMetricsOptions` — FetchMetricsOptions 实例
+   */
+
+  getFetchMetricsOptions(): FetchMetricsOptions {
+    const m = this.file.fetchMetrics;
+    return {
+      enabled: m?.enabled ?? true,
+      logEachAttempt: m?.logEachAttempt ?? false,
+      summaryIntervalMs: m?.summaryIntervalMs ?? 30_000,
+      maxRecentAttempts: m?.maxRecentAttempts ?? 1000,
+      maxRecentRequests: m?.maxRecentRequests ?? 500,
+      maxRecentFlightPaths: m?.maxRecentFlightPaths ?? 500,
+      ipStatsDir: m?.ipStatsDir ?? "config/ip-stats",
+      ipStatsFlushIntervalMs: m?.ipStatsFlushIntervalMs ?? 5_000,
+      ipStatsSeedFromHostPin: m?.ipStatsSeedFromHostPin ?? true,
+    };
+  }
+
+  /**
+   * 执行 resolvePath。
+   * @param relOrAbs - 输入：`string` — relOrAbs 参数
+   * @returns 输出：`string` — 字符串结果
    */
 
   static resolvePath(relOrAbs: string): string {
@@ -343,9 +556,10 @@ export class GeoClawConfig {
   }
 
   /**
-   * 解析 geoclaw.yaml 路径。
-   * @param configPath - 输入：`string | undefined` — 可选覆盖
-   * @returns 输出：`string` — 绝对路径
+   * 执行 resolveConfigPath。
+   * @param configPath - 输入：`undefined | string` — configPath 参数
+   * @returns 输出：`string` — 字符串结果
+   * @throws {Error} 条件不满足或 I/O 失败时
    */
 
   static resolveConfigPath(configPath?: string): string {
@@ -381,10 +595,10 @@ export const geoclawConfig = {
 };
 
 /**
- * 拼接 base 与 path。
+ * 拼接 Url。
  * @param base - 输入：`string` — 基础 URL
- * @param pathSegment - 输入：`string` — 路径段
- * @returns 输出：`string` — 完整 URL
+ * @param pathSegment - 输入：`string` — pathSegment 参数
+ * @returns 输出：`string` — 字符串结果
  */
 function joinUrl(base: string, pathSegment: string): string {
   return `${base.replace(/\/+$/, "")}/${pathSegment.replace(/^\/+/, "")}`;

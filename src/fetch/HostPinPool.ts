@@ -1,14 +1,33 @@
 import { readFileSync } from "node:fs";
 
 import type { DnsOptions } from "node-wreq";
+import { parse as parseYaml } from "yaml";
 
 import { GeoClawConfig } from "../core/GeoClawConfig.js";
 import { Logger } from "../core/Logger.js";
 
-/** YAML 中单条 IP 记录（仅解析 ip 字段） */
+/** YAML 中单条 IP 记录 */
 export type HostPinRecord = {
   ip: string;
   family: "ipv4" | "ipv6";
+  hostname?: string;
+  city?: string;
+  region?: string;
+  country?: string;
+  loc?: string;
+  org?: string;
+  timezone?: string;
+};
+
+type YamlIpEntry = {
+  ip: string;
+  hostname?: string;
+  city?: string;
+  region?: string;
+  country?: string;
+  loc?: string;
+  org?: string;
+  timezone?: string;
 };
 
 export type HostPinPoolOptions = {
@@ -25,12 +44,13 @@ export type HostPinPoolOptions = {
 export type HostPinResolveResult = {
   hostname: string;
   pinnedIp: string;
+  record: HostPinRecord;
   dns: DnsOptions;
 };
 
 /**
- * 从 geoclaw.yaml hostPin 段创建 HostPin 池；未启用时返回 undefined。
- * @returns 输出：`HostPinPool | undefined` — 配置启用时的池实例
+ * 创建 HostPinPoolFromConfig。
+ * @returns 输出：`undefined | HostPinPool` — undefined | HostPinPool 实例
  */
 export function createHostPinPoolFromConfig(): HostPinPool | undefined {
   const opts = GeoClawConfig.get().getHostPinPoolOptions();
@@ -48,7 +68,10 @@ export class HostPinPool {
   private roundRobinIndex = 0;
 
   /**
-   * @param options - 输入：`HostPinPoolOptions` — 域名、YAML 路径或预置 IP
+   * 构造实例。
+   * @param options - 输入：`HostPinPoolOptions` — 配置选项
+   * @returns 输出：`HostPinPool` — HostPinPool 实例
+   * @throws {Error} 条件不满足或 I/O 失败时
    */
 
   constructor(options: HostPinPoolOptions) {
@@ -64,8 +87,8 @@ export class HostPinPool {
   }
 
   /**
-   * 返回池中 IP 数量（懒加载 YAML）。
-   * @returns 输出：`number` — 可用 IP 数
+   * 执行 size。
+   * @returns 输出：`number` — 数值结果
    */
 
   size(): number {
@@ -73,12 +96,21 @@ export class HostPinPool {
   }
 
   /**
-   * 轮询取下一条 IP。
-   * @returns 输出：`string` — IPv4 或 IPv6 地址
-   * @throws {Error} 池为空时
+   * 执行 nextIp。
+   * @returns 输出：`string` — 字符串结果
    */
 
   nextIp(): string {
+    return this.nextRecord().ip;
+  }
+
+  /**
+   * 执行 nextRecord。
+   * @returns 输出：`HostPinRecord` — HostPinRecord 实例
+   * @throws {Error} 条件不满足或 I/O 失败时
+   */
+
+  nextRecord(): HostPinRecord {
     const list = this.loadRecords();
     if (list.length === 0) {
       HostPinPool.logger.error("HostPin 池为空", { hostname: this.options.hostname });
@@ -93,16 +125,26 @@ export class HostPinPool {
       index: this.roundRobinIndex,
       poolSize: list.length,
     });
-    return record.ip;
+    return record;
   }
 
   /**
-   * 若 URL 主机名匹配池域名，生成 node-wreq dns.hosts（单 IP，无 DNS 查询）。
-   * @param url - 输入：`string` — 请求 URL
-   * @returns 输出：`HostPinResolveResult | undefined` — 不匹配时 undefined
+   * 执行 resolveForUrl。
+   * @param url - 输入：`string` — 完整 HTTP URL
+   * @returns 输出：`undefined | HostPinResolveResult` — undefined | HostPinResolveResult 实例
    */
 
   resolveForUrl(url: string): HostPinResolveResult | undefined {
+    return this.resolveForUrlWithRecord(url);
+  }
+
+  /**
+   * 执行 resolveForUrlWithRecord。
+   * @param url - 输入：`string` — 完整 HTTP URL
+   * @returns 输出：`undefined | HostPinResolveResult` — undefined | HostPinResolveResult 实例
+   */
+
+  resolveForUrlWithRecord(url: string): HostPinResolveResult | undefined {
     return HostPinPool.logger.measureSync(
       "resolveForUrl",
       () => {
@@ -110,13 +152,14 @@ export class HostPinPool {
         if (hostname !== this.options.hostname) {
           return undefined;
         }
-        const pinnedIp = this.nextIp();
+        const pinnedIp = this.nextRecord();
         return {
           hostname,
-          pinnedIp,
+          pinnedIp: pinnedIp.ip,
+          record: pinnedIp,
           dns: {
             hosts: {
-              [hostname]: [pinnedIp],
+              [hostname]: [pinnedIp.ip],
             },
           },
         };
@@ -174,46 +217,50 @@ export class HostPinPool {
 }
 
 /**
- * 解析 kh.google.com.yaml 中的 ipv4 / ipv6 列表。
- * @param yamlText - 输入：`string` — YAML 全文
- * @returns 输出：`{ ipv4, ipv6, all }` — 分族与合并列表
+ * 解析 KhGoogleYaml。
+ * @param yamlText - 输入：`string` — yamlText 参数
+ * @returns 输出：`object` — object 实例
  */
 export function parseKhGoogleYaml(yamlText: string): {
   ipv4: HostPinRecord[];
   ipv6: HostPinRecord[];
   all: HostPinRecord[];
 } {
-  const ipv4: HostPinRecord[] = [];
-  const ipv6: HostPinRecord[] = [];
-  let section: "none" | "ipv4" | "ipv6" = "none";
-
-  for (const line of yamlText.split("\n")) {
-    if (line.startsWith("ipv4:")) {
-      section = "ipv4";
-      continue;
-    }
-    if (line.startsWith("ipv6:")) {
-      section = "ipv6";
-      continue;
-    }
-    const match = line.match(/^\s+- ip:\s+(\S+)/);
-    if (!match?.[1]) continue;
-    const ip = match[1];
-    if (section === "ipv4") {
-      ipv4.push({ ip, family: "ipv4" });
-    } else if (section === "ipv6") {
-      ipv6.push({ ip, family: "ipv6" });
-    }
-  }
-
+  const doc = parseYaml(yamlText) as { ipv4?: YamlIpEntry[]; ipv6?: YamlIpEntry[] } | null;
+  const ipv4 = (doc?.ipv4 ?? [])
+    .filter((e): e is YamlIpEntry => Boolean(e?.ip))
+    .map((e) => yamlEntryToRecord(e, "ipv4"));
+  const ipv6 = (doc?.ipv6 ?? [])
+    .filter((e): e is YamlIpEntry => Boolean(e?.ip))
+    .map((e) => yamlEntryToRecord(e, "ipv6"));
   return { ipv4, ipv6, all: [...ipv4, ...ipv6] };
 }
 
 /**
- * 从 YAML 文件加载 IP 列表。
- * @param yamlPath - 输入：`string` — ipsFile 绝对路径
- * @param family - 输入：`"all" | "ipv4" | "ipv6"` — 地址族
- * @returns 输出：`HostPinRecord[]` — IP 记录
+ * 执行 yamlEntryToRecord。
+ * @param entry - 输入：`YamlIpEntry` — entry 参数
+ * @param family - 输入：`"ipv4" | "ipv6"` — family 参数
+ * @returns 输出：`HostPinRecord` — HostPinRecord 实例
+ */
+function yamlEntryToRecord(entry: YamlIpEntry, family: "ipv4" | "ipv6"): HostPinRecord {
+  return {
+    ip: entry.ip,
+    family,
+    hostname: entry.hostname,
+    city: entry.city,
+    region: entry.region,
+    country: entry.country,
+    loc: entry.loc,
+    org: entry.org,
+    timezone: entry.timezone,
+  };
+}
+
+/**
+ * 执行 loadHostPinRecordsFromYaml。
+ * @param yamlPath - 输入：`string` — yamlPath 参数
+ * @param family - 输入：`"ipv4" | "ipv6" | "all"` — family 参数
+ * @returns 输出：`HostPinRecord[]` — HostPinRecord[] 实例
  */
 export function loadHostPinRecordsFromYaml(
   yamlPath: string,

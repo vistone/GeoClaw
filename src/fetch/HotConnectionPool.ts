@@ -14,8 +14,10 @@ import type { TlsFingerprintConfig } from "./TlsFingerprintCodec.js";
 import {
   HotFetchNoHotIpError,
   HotFetchNotOkError,
+  HotFetchTimeoutError,
   HotFetchTransportError,
 } from "./FetchErrors.js";
+import { ColdConnectionPool } from "./ColdConnectionPool.js";
 
 /** 单 IP 槽位状态 */
 export type HotSlotState = "pending" | "warming" | "hot" | "denied" | "failed";
@@ -42,6 +44,17 @@ export type HotConnectionPoolOptions = {
   reheatIntervalMs: number;
   reheatBackoffMs: number;
   deniedBackoffMs: number;
+  /** 下载中命中这些状态码时入冷池（默认与 deniedStatuses 相同） */
+  coldPoolStatuses: readonly number[];
+  /** 创建池后立即后台首轮预热（不阻塞，HTTP 200 即入热池） */
+  autoStartWarmup: boolean;
+  /**
+   * 估计服务端空闲超时（毫秒）。选路优先把任务派给最接近过期的热连接以续命；
+   * 空闲达到该窗口约 75% 时发轻量保活。0 表示不按过期排序/不保活（退化为任意热 IP）。
+   */
+  idleExpireMs: number;
+  /** 每轮保活最大并发 */
+  keepAliveConcurrency: number;
 };
 
 /** 预热汇总 */
@@ -62,6 +75,8 @@ export type HotPoolStats = {
   pending: number;
   warming: number;
   reheatQueueSize: number;
+  cold: number;
+  initialWarmupInProgress: boolean;
 };
 
 type IpSlot = {
@@ -72,6 +87,10 @@ type IpSlot = {
   lastStatus?: number;
   lastError?: string;
   nextReheatAt: number;
+  /** 最近一次成功收发时间（保活 / 判断空闲） */
+  lastUsedAt: number;
+  /** 业务派发次数（不含预热/保活）；选路优先参与少的 */
+  assignCount: number;
 };
 
 /**
@@ -82,41 +101,103 @@ export class HotConnectionPool {
   private readonly options: HotConnectionPoolOptions;
   private readonly slots = new Map<string, IpSlot>();
   private readonly hotIps: string[] = [];
-  private hotIndex = 0;
-  private readonly reheatQueue = new Set<string>();
+  private readonly coldPool: ColdConnectionPool;
   private reheatTimer: ReturnType<typeof setInterval> | undefined;
   private reheatRunning = false;
   private reheatBusy = false;
+  private initialWarmupInProgress = false;
+  private initialWarmupPromise: Promise<WarmupSummary> | null = null;
 
   /**
-   * @param options - 输入：`HotConnectionPoolOptions` — 来自 GeoClawConfig.getWarmPoolOptions()
+   * 构造实例。
+   * @param options - 输入：`HotConnectionPoolOptions` — 配置选项
+   * @returns 输出：`HotConnectionPool` — HotConnectionPool 实例
    */
 
   constructor(options: HotConnectionPoolOptions) {
     this.options = options;
+    this.coldPool = new ColdConnectionPool({
+      coldPoolStatuses: options.coldPoolStatuses,
+    });
     for (const record of options.ips) {
       this.slots.set(record.ip, {
         ip: record.ip,
         family: record.family,
         state: "pending",
         nextReheatAt: 0,
+        lastUsedAt: 0,
+        assignCount: 0,
       });
     }
     HotConnectionPool.logger.info("热连接池已创建", {
       hostname: options.hostname,
       ipCount: options.ips.length,
     });
+    if (options.autoStartWarmup) {
+      this.startInitialWarmup();
+      this.startBackgroundReheat();
+    }
   }
 
   /**
-   * 首轮并行预热全部 IP。
-   * @returns 输出：`Promise<WarmupSummary>` — 热/拒/待重试计数
+   * 执行 startInitialWarmup。
+   * @returns 输出：无（`void`）
+   */
+
+  startInitialWarmup(): void {
+    if (this.initialWarmupPromise) {
+      return;
+    }
+    this.initialWarmupInProgress = true;
+    this.initialWarmupPromise = this.runInitialWarmupInternal();
+    void this.initialWarmupPromise.finally(() => {
+      this.initialWarmupInProgress = false;
+    });
+  }
+
+  /**
+   * 判断 InitialWarmupInProgress。
+   * @returns 输出：`boolean` — 条件成立返回 true，否则 false
+   */
+
+  isInitialWarmupInProgress(): boolean {
+    return this.initialWarmupInProgress;
+  }
+
+  /**
+   * 执行 waitInitialWarmup。
+   * @returns 输出：`Promise<WarmupSummary>` — 异步返回 WarmupSummary
+   */
+
+  waitInitialWarmup(): Promise<WarmupSummary> {
+    if (!this.initialWarmupPromise) {
+      return Promise.resolve(this.buildWarmupSummary(0));
+    }
+    return this.initialWarmupPromise;
+  }
+
+  /**
+   * 执行 runInitialWarmup。
+   * @returns 输出：`Promise<WarmupSummary>` — 异步返回 WarmupSummary
    */
 
   async runInitialWarmup(): Promise<WarmupSummary> {
+    this.startInitialWarmup();
+    return this.waitInitialWarmup();
+  }
+
+  /**
+   * 执行首轮预热任务（内部异步）。
+   * @returns 输出：`Promise<WarmupSummary>` — 汇总
+   */
+
+  private async runInitialWarmupInternal(): Promise<WarmupSummary> {
     const started = Date.now();
     const ips = [...this.slots.keys()];
-    HotConnectionPool.logger.info("开始首轮预热", { count: ips.length });
+    HotConnectionPool.logger.info("开始后台批量预热", {
+      count: ips.length,
+      batchConcurrency: this.options.initialConcurrency,
+    });
     const outcomes = await this.runPool(
       ips,
       this.options.initialConcurrency,
@@ -124,12 +205,29 @@ export class HotConnectionPool {
     );
 
     const summary = summarizeOutcomes(outcomes, ips.length, Date.now() - started);
-    HotConnectionPool.logger.info("首轮预热完成", summary);
+    HotConnectionPool.logger.info("后台首轮预热完成", summary);
     return summary;
   }
 
   /**
-   * 启动后台重加热循环（403/429/传输失败 IP）。
+   * 构建空/已完成预热汇总（尚未启动时）。
+   * @param elapsedMs - 输入：`number` — 耗时毫秒
+   * @returns 输出：`WarmupSummary` — 汇总
+   */
+
+  private buildWarmupSummary(elapsedMs: number): WarmupSummary {
+    const stats = this.getStats();
+    return {
+      total: stats.total,
+      hot: stats.hot,
+      denied: stats.denied,
+      retry: stats.failed + stats.pending,
+      elapsedMs,
+    };
+  }
+
+  /**
+   * 执行 startBackgroundReheat。
    * @returns 输出：无（`void`）
    */
 
@@ -148,7 +246,7 @@ export class HotConnectionPool {
   }
 
   /**
-   * 停止后台重加热。
+   * 执行 stopBackgroundReheat。
    * @returns 输出：无（`void`）
    */
 
@@ -161,8 +259,8 @@ export class HotConnectionPool {
   }
 
   /**
-   * 当前可用（HTTP 200 已预热）热连接数量。
-   * @returns 输出：`number` — hot 槽位数
+   * 获取 HotCount。
+   * @returns 输出：`number` — 数值结果
    */
 
   getHotCount(): number {
@@ -170,8 +268,56 @@ export class HotConnectionPool {
   }
 
   /**
-   * 池统计快照。
-   * @returns 输出：`HotPoolStats` — 各状态计数
+   * 获取 HotIps。
+   * @returns 输出：`string[]` — string[] 实例
+   */
+  getHotIps(): string[] {
+    return [...this.hotIps];
+  }
+
+  /**
+   * 执行 resetAssignCounts。
+   * @returns 输出：`number` — 数值结果
+   */
+  resetAssignCounts(): number {
+    let n = 0;
+    for (const slot of this.slots.values()) {
+      if (slot.assignCount) n += 1;
+      slot.assignCount = 0;
+    }
+    return n;
+  }
+
+  /**
+   * 判断 Hot。
+   * @param ip - 输入：`string` — ip 参数
+   * @returns 输出：`boolean` — 条件成立返回 true，否则 false
+   */
+  isHot(ip: string): boolean {
+    return this.slots.get(ip)?.state === "hot" && !this.coldPool.isCold(ip);
+  }
+
+  /**
+   * 获取 ColdCount。
+   * @returns 输出：`number` — 数值结果
+   */
+
+  getColdCount(): number {
+    return this.coldPool.getColdCount();
+  }
+
+  /**
+   * 获取 ColdPool。
+   * @returns 输出：`ColdConnectionPool` — ColdConnectionPool 实例
+   */
+
+  getColdPool(): ColdConnectionPool {
+    return this.coldPool;
+  }
+
+  /**
+   * 获取 Stats。
+   * @returns 输出：`HotPoolStats` — HotPoolStats 实例
    */
 
   getStats(): HotPoolStats {
@@ -206,18 +352,18 @@ export class HotConnectionPool {
       failed,
       pending,
       warming,
-      reheatQueueSize: this.reheatQueue.size,
+      reheatQueueSize: this.coldPool.getDueForReheat().length,
+      cold: this.coldPool.getColdCount(),
+      initialWarmupInProgress: this.initialWarmupInProgress,
     };
   }
 
   /**
-   * 单次热连接 GET：只用一个 IP、只试一次；非 200 立即抛弃并移出热池。
-   * @param url - 输入：`string` — 完整 URL
-   * @param extraHeaders - 输入：`Record<string, string>` — 单次附加头
-   * @returns 输出：`Promise<{ response, ip, timings? }>` — 仅 successStatus 时返回
-   * @throws {HotFetchNotOkError} HTTP 非 successStatus
-   * @throws {HotFetchTransportError} 传输失败
-   * @throws {HotFetchNoHotIpError} 无热连接
+   * 拉取 Once。
+   * @param url - 输入：`string` — 完整 HTTP URL
+   * @param extraHeaders - 输入：`Record<string, string>` — extraHeaders 参数
+   * @returns 输出：`Promise<object>` — 异步返回 object
+   * @throws {Error} 条件不满足或 I/O 失败时
    */
 
   async fetchOnce(
@@ -234,11 +380,14 @@ export class HotConnectionPool {
 
     const ip = this.pickHotIp();
     const slot = this.slots.get(ip);
-    if (!slot?.client) {
+    if (!slot?.client || this.coldPool.isCold(ip)) {
       throw new HotFetchNoHotIpError();
     }
+    // 一派出即计数，避免失败重试总砸同一条「参与少」的连接
+    slot.assignCount += 1;
 
     let stats: RequestStats | undefined;
+    const t0 = Date.now();
     try {
       const response = await slot.client.get(url, {
         headers: extraHeaders,
@@ -247,29 +396,47 @@ export class HotConnectionPool {
           stats = s;
         },
       });
+      const t1 = Date.now();
 
       if (response.status === this.options.successStatus) {
-        return { response, ip, timings: response.wreq.timings ?? stats?.timings };
+        slot.lastUsedAt = t1;
+        const timings =
+          response.wreq.timings ??
+          stats?.timings ??
+          ({ startTime: t0, responseStart: t1, wait: t1 - t0 } satisfies RequestTimings);
+        return { response, ip, timings };
       }
 
       void response.arrayBuffer().catch(() => undefined);
-      const kind = this.options.deniedStatuses.includes(response.status) ? "denied" : "failed";
-      this.evictToReheat(ip, kind, response.status);
+      if (this.coldPool.shouldAdmit(response.status)) {
+        this.evictToColdPool(ip, response.status);
+      } else {
+        this.evictFailedFromHot(ip, response.status);
+      }
       throw new HotFetchNotOkError(response.status, ip);
     } catch (err) {
       if (err instanceof HotFetchNotOkError) {
         throw err;
       }
-      this.evictToReheat(ip, "failed", undefined, err);
+      // 超时：保留热连接，任务回队换 IP（不入待预热、不当错误）
+      if (isTimeoutError(err)) {
+        HotConnectionPool.logger.debug("热连接请求超时，保留热池并回队", {
+          ip,
+          timeoutMs: this.options.timeoutMs,
+          error: formatTransportError(err),
+        });
+        throw new HotFetchTimeoutError(ip, err);
+      }
+      this.evictFailedFromHot(ip, undefined, err);
       throw new HotFetchTransportError(ip, err);
     }
   }
 
   /**
-   * @deprecated 使用 fetchOnce + FetchTaskPool；不在此方法内重试
-   * @param url - 输入：`string` — 完整 URL
-   * @param extraHeaders - 输入：`Record<string, string>` — 附加头
-   * @returns 输出：`Promise<{ response, ip, timings? }>` — 同 fetchOnce
+   * 拉取 Get。
+   * @param url - 输入：`string` — 完整 HTTP URL
+   * @param extraHeaders - 输入：`Record<string, string>` — extraHeaders 参数
+   * @returns 输出：`Promise<object>` — 异步返回 object
    */
   async fetchGet(
     url: string,
@@ -283,7 +450,7 @@ export class HotConnectionPool {
   }
 
   /**
-   * 释放全部 native 连接。
+   * 执行 close。
    * @returns 输出：无（`void`）
    */
 
@@ -348,8 +515,9 @@ export class HotConnectionPool {
         slot.state = "hot";
         slot.lastStatus = response.status;
         slot.lastError = undefined;
+        slot.lastUsedAt = Date.now();
+        this.coldPool.release(ip);
         this.addToHotList(ip);
-        this.reheatQueue.delete(ip);
         HotConnectionPool.logger.debug("IP 入热池", { ip, status: response.status });
         return "hot";
       }
@@ -360,23 +528,58 @@ export class HotConnectionPool {
       if (outcome === "denied") {
         slot.state = "denied";
         slot.lastStatus = response.status;
-        this.scheduleReheat(ip, this.options.deniedBackoffMs);
-        HotConnectionPool.logger.debug("IP 拒绝服务，后台重试", { ip, status: response.status });
+        this.coldPool.ensureCold(ip, response.status, this.options.deniedBackoffMs);
+        HotConnectionPool.logger.debug("IP 预热仍拒绝，留冷池", { ip, status: response.status });
         return "denied";
       }
 
       slot.state = "failed";
       slot.lastStatus = response.status;
-      this.scheduleReheat(ip, this.options.reheatBackoffMs);
+      slot.nextReheatAt = Date.now() + this.options.reheatBackoffMs;
+      this.coldPool.scheduleReheat(ip, this.options.reheatBackoffMs);
       return "retry";
     } catch (err) {
       client.close();
-      slot.state = "failed";
-      slot.lastError = err instanceof Error ? err.message : String(err);
-      this.scheduleReheat(ip, this.options.reheatBackoffMs);
-      HotConnectionPool.logger.debug("IP 预热传输失败，后台重试", { ip, error: slot.lastError });
+      // EOF / 超时等：进待预热队列，热通前不参与下载
+      this.enqueuePendingReheat(ip, err, "warmup");
       return "retry";
     }
+  }
+
+  /**
+   * 传输失败后进入待预热：移出热池、设退避，由后台 tick 再 warmOne。
+   */
+  private enqueuePendingReheat(
+    ip: string,
+    err?: unknown,
+    source = "transport",
+    status?: number,
+  ): void {
+    const slot = this.slots.get(ip);
+    if (!slot) return;
+
+    slot.client?.close();
+    slot.client = undefined;
+    slot.state = "failed";
+    if (status !== undefined) slot.lastStatus = status;
+    const errorDetail = formatTransportError(err);
+    if (errorDetail) slot.lastError = errorDetail;
+    this.removeFromHotList(ip);
+    slot.nextReheatAt = Date.now() + this.options.reheatBackoffMs;
+
+    if (this.coldPool.isCold(ip)) {
+      this.coldPool.scheduleReheat(ip, this.options.reheatBackoffMs);
+    }
+
+    HotConnectionPool.logger.warn("IP 入待预热队列（热通前不参与下载）", {
+      ip,
+      source,
+      status: status ?? null,
+      error: errorDetail ?? "(无详情)",
+      transient: isEofOrTimeoutError(err),
+      reheatBackoffMs: this.options.reheatBackoffMs,
+      nextReheatAt: new Date(slot.nextReheatAt).toISOString(),
+    });
   }
 
   /**
@@ -389,87 +592,193 @@ export class HotConnectionPool {
       return;
     }
 
-    const now = Date.now();
-    const due = [...this.reheatQueue].filter((ip) => {
-      const slot = this.slots.get(ip);
-      return slot && slot.state !== "hot" && slot.state !== "warming" && slot.nextReheatAt <= now;
-    });
-
-    if (due.length === 0) {
-      return;
-    }
-
     this.reheatBusy = true;
     try {
-      const batch = due.slice(0, this.options.reheatConcurrency);
-      HotConnectionPool.logger.debug("后台重加热批次", { count: batch.length });
-      await this.runPool(batch, this.options.reheatConcurrency, (ip) => this.warmOne(ip));
+      const due = this.coldPool.getDueForReheat();
+      const now = Date.now();
+      const pendingReheat = [...this.slots.values()]
+        .filter(
+          (s) =>
+            s.state === "failed" &&
+            !this.coldPool.isCold(s.ip) &&
+            now >= (s.nextReheatAt || 0),
+        )
+        .map((s) => s.ip);
+
+      const batchIps = [...new Set([...due, ...pendingReheat])].filter((ip) => {
+        const slot = this.slots.get(ip);
+        return slot && slot.state !== "hot" && slot.state !== "warming";
+      });
+
+      const tasks: Promise<unknown>[] = [];
+
+      if (batchIps.length > 0) {
+        const batch = batchIps.slice(0, this.options.reheatConcurrency);
+        HotConnectionPool.logger.debug("后台重加热批次", {
+          count: batch.length,
+          fromCold: due.length,
+          fromPending: pendingReheat.length,
+        });
+        tasks.push(this.runPool(batch, this.options.reheatConcurrency, (ip) => this.warmOne(ip)));
+      }
+
+      // 与重热并行，互不等待串行拖死事件循环
+      tasks.push(this.keepAliveIdleHot());
+      await Promise.all(tasks);
     } finally {
       this.reheatBusy = false;
     }
   }
 
   /**
-   * 将 IP 移出热池并加入重试队列。
+   * 对即将空闲超时的热连接发轻量 GET；优先续命最老的，避免全量狂 ping。
+   */
+  private async keepAliveIdleHot(): Promise<void> {
+    const expireMs = this.options.idleExpireMs;
+    if (!expireMs || expireMs <= 0) return;
+    // 首轮预热期间不做保活，避免与大批量预热抢占带宽/触发对端限流
+    if (this.initialWarmupInProgress) return;
+
+    const now = Date.now();
+    // 空闲达到窗口 75% 即视为「快要超时」，与业务选路同一套过期模型
+    const keepAliveAfter = Math.floor(expireMs * 0.75);
+    const due = this.hotIps
+      .map((ip) => {
+        const slot = this.slots.get(ip);
+        if (!slot?.client || slot.state !== "hot" || this.coldPool.isCold(ip)) {
+          return null;
+        }
+        const age = now - (slot.lastUsedAt || 0);
+        if (age < keepAliveAfter) return null;
+        return { ip, lastUsedAt: slot.lastUsedAt || 0 };
+      })
+      .filter((x): x is { ip: string; lastUsedAt: number } => x != null)
+      .sort((a, b) => a.lastUsedAt - b.lastUsedAt);
+
+    if (due.length === 0) return;
+
+    const concurrency = Math.max(1, this.options.keepAliveConcurrency || 20);
+    const batch = due.slice(0, concurrency).map((x) => x.ip);
+    HotConnectionPool.logger.debug("热连接保活（快过期优先）", {
+      count: batch.length,
+      due: due.length,
+      idleExpireMs: expireMs,
+      keepAliveAfter,
+    });
+    await this.runPool(batch, concurrency, async (ip) => {
+      const slot = this.slots.get(ip);
+      if (!slot?.client || slot.state !== "hot") return;
+      try {
+        const response = await slot.client.get(this.options.warmupUrl, {
+          ...(this.options.timeoutMs !== undefined ? { timeout: this.options.timeoutMs } : {}),
+        });
+        await response.arrayBuffer().catch(() => undefined);
+        if (response.status === this.options.successStatus) {
+          slot.lastUsedAt = Date.now();
+          slot.lastStatus = response.status;
+          return;
+        }
+        if (this.coldPool.shouldAdmit(response.status)) {
+          this.evictToColdPool(ip, response.status);
+        } else {
+          this.evictFailedFromHot(ip, response.status);
+        }
+      } catch (err) {
+        // 保活超时：不算错误，不踢热池
+        if (isTimeoutError(err)) {
+          HotConnectionPool.logger.debug("热连接保活超时，跳过", {
+            ip,
+            error: formatTransportError(err),
+          });
+          return;
+        }
+        HotConnectionPool.logger.debug("热连接保活失败，移出重热", {
+          ip,
+          error: formatTransportError(err) ?? String(err),
+        });
+        this.evictFailedFromHot(ip, undefined, err);
+      }
+    });
+  }
+
+  /**
+   * 下载中 403/429：移出热池并放入冷池，须预热 HTTP 200 后才可恢复。
    * @param ip - 输入：`string` — IP
-   * @param kind - 输入：`"denied" | "failed"` — 拒绝或失败
-   * @param status - 输入：`number | undefined` — HTTP 状态
-   * @param err - 输入：`unknown` — 传输错误
+   * @param status - 输入：`number` — HTTP 状态
    * @returns 输出：无（`void`）
    */
 
-  private evictToReheat(
-    ip: string,
-    kind: "denied" | "failed",
-    status?: number,
-    err?: unknown,
-  ): void {
+  private evictToColdPool(ip: string, status: number): void {
     const slot = this.slots.get(ip);
     if (!slot) {
       return;
     }
     slot.client?.close();
     slot.client = undefined;
-    slot.state = kind;
+    slot.state = "denied";
     slot.lastStatus = status;
-    if (err !== undefined) {
-      slot.lastError = err instanceof Error ? err.message : String(err);
-    }
     this.removeFromHotList(ip);
-    const backoff = kind === "denied" ? this.options.deniedBackoffMs : this.options.reheatBackoffMs;
-    this.scheduleReheat(ip, backoff);
-    HotConnectionPool.logger.warn("热连接移出并重试", { ip, kind, status });
+    this.coldPool.ensureCold(ip, status, this.options.deniedBackoffMs);
+    HotConnectionPool.logger.warn("下载 403/429，IP 入冷池", { ip, status });
   }
 
   /**
-   * 安排后台重试时间。
+   * 非冷池拒绝类失败：移出热池，短退避后重预热（不入冷池除非已在冷池）。
    * @param ip - 输入：`string` — IP
-   * @param backoffMs - 输入：`number` — 延迟毫秒
+   * @param status - 输入：`number | undefined` — HTTP 状态
+   * @param err - 输入：`unknown` — 传输错误
    * @returns 输出：无（`void`）
    */
 
-  private scheduleReheat(ip: string, backoffMs: number): void {
-    const slot = this.slots.get(ip);
-    if (!slot) {
+  private evictFailedFromHot(ip: string, status?: number, err?: unknown): void {
+    if (!this.slots.get(ip)) {
       return;
     }
-    slot.nextReheatAt = Date.now() + backoffMs;
-    this.reheatQueue.add(ip);
+    // 统一进待预热：业务/保活传输失败也不再参与下载，等 warmOne 成功后再入热池
+    this.enqueuePendingReheat(
+      ip,
+      err,
+      status !== undefined ? `http_${status}` : "download_or_keepalive",
+      status,
+    );
   }
 
   /**
-   * 轮询选取下一个 hot IP。
+   * 选取业务 IP：优先参与少的，同次数则优先快过期（久未用），让全池更均匀地接到任务。
+   * 快过期的无流量续命仍由 keepAliveIdleHot 负责。
    * @returns 输出：`string` — IP 地址
    */
 
   private pickHotIp(): string {
-    const ip = this.hotIps[this.hotIndex % this.hotIps.length]!;
-    this.hotIndex = (this.hotIndex + 1) % this.hotIps.length;
-    return ip;
+    const now = Date.now();
+    const candidates: { ip: string; lastUsedAt: number; assignCount: number }[] = [];
+
+    for (const ip of this.hotIps) {
+      if (this.coldPool.isCold(ip)) {
+        this.removeFromHotList(ip);
+        continue;
+      }
+      const slot = this.slots.get(ip);
+      if (!slot?.client || slot.state !== "hot") {
+        this.removeFromHotList(ip);
+        continue;
+      }
+      candidates.push({
+        ip,
+        lastUsedAt: slot.lastUsedAt || 0,
+        assignCount: slot.assignCount || 0,
+      });
+    }
+
+    const picked = pickFairHotIp(candidates, now, this.options.idleExpireMs);
+    if (!picked) {
+      throw new HotFetchNoHotIpError();
+    }
+    return picked;
   }
 
   /**
-   * 将 IP 加入热池轮询列表。
+   * 将 IP 加入热池列表。
    * @param ip - 输入：`string` — IP
    * @returns 输出：无（`void`）
    */
@@ -481,7 +790,7 @@ export class HotConnectionPool {
   }
 
   /**
-   * 从热池轮询列表移除 IP。
+   * 从热池列表移除 IP。
    * @param ip - 输入：`string` — IP
    * @returns 输出：无（`void`）
    */
@@ -490,9 +799,6 @@ export class HotConnectionPool {
     const idx = this.hotIps.indexOf(ip);
     if (idx >= 0) {
       this.hotIps.splice(idx, 1);
-      if (this.hotIndex >= this.hotIps.length) {
-        this.hotIndex = 0;
-      }
     }
   }
 
@@ -512,13 +818,23 @@ export class HotConnectionPool {
     const results: R[] = new Array(items.length);
     let next = 0;
 
+    const yieldEventLoop = (): Promise<void> =>
+      new Promise((resolve) => setImmediate(resolve));
+
     async function loop(): Promise<void> {
+      let sinceYield = 0;
       while (true) {
         const i = next++;
         if (i >= items.length) {
           return;
         }
         results[i] = await worker(items[i]!);
+        // 大批量预热/保活时让出事件循环，避免堵死 HTTP/WS
+        sinceYield += 1;
+        if (sinceYield >= 8) {
+          sinceYield = 0;
+          await yieldEventLoop();
+        }
       }
     }
 
@@ -530,8 +846,105 @@ export class HotConnectionPool {
 }
 
 /**
- * 从 geoclaw.yaml 创建热连接池；warmPool.enabled 为 false 时返回 undefined。
- * @returns 输出：`HotConnectionPool | undefined` — 池实例
+ * 执行 pickFairHotIp。
+ * @param candidates - 输入：`object[]` — candidates 参数
+ * @param _now - 输入：`number` — _now 参数
+ * @param _idleExpireMs - 输入：`number` — _idleExpireMs 参数
+ * @returns 输出：`undefined | string` — undefined | string 实例
+ */
+export function pickFairHotIp(
+  candidates: readonly { ip: string; lastUsedAt: number; assignCount: number }[],
+  _now = Date.now(),
+  _idleExpireMs = 0,
+): string | undefined {
+  if (candidates.length === 0) return undefined;
+
+  const sorted = [...candidates].sort((a, b) => {
+    if (a.assignCount !== b.assignCount) return a.assignCount - b.assignCount;
+    if (a.lastUsedAt !== b.lastUsedAt) return a.lastUsedAt - b.lastUsedAt;
+    return a.ip.localeCompare(b.ip);
+  });
+  return sorted[0]?.ip;
+}
+
+/**
+ * 执行 pickNearestExpiryHotIp。
+ * @param candidates - 输入：`object[]` — candidates 参数
+ * @param now - 输入：`number` — now 参数
+ * @param idleExpireMs - 输入：`number` — idleExpireMs 参数
+ * @returns 输出：`undefined | string` — undefined | string 实例
+ */
+export function pickNearestExpiryHotIp(
+  candidates: readonly { ip: string; lastUsedAt: number; assignCount?: number }[],
+  now: number,
+  idleExpireMs: number,
+): string | undefined {
+  return pickFairHotIp(
+    candidates.map((c) => ({
+      ip: c.ip,
+      lastUsedAt: c.lastUsedAt,
+      assignCount: c.assignCount ?? 0,
+    })),
+    now,
+    idleExpireMs,
+  );
+}
+
+/**
+ * 执行 formatTransportError。
+ * @param err - 输入：`unknown` — 错误对象
+ * @returns 输出：`undefined | string` — undefined | string 实例
+ */
+export function formatTransportError(err: unknown): string | undefined {
+  if (err === undefined || err === null) return undefined;
+  if (typeof err === "string") return err;
+  if (!(err instanceof Error)) return String(err);
+
+  const parts: string[] = [];
+  const name = err.name && err.name !== "Error" ? err.name : "";
+  const msg = err.message || "";
+  if (name && msg) parts.push(`${name}: ${msg}`);
+  else if (msg) parts.push(msg);
+  else if (name) parts.push(name);
+
+  const code = (err as { code?: string | number }).code;
+  if (code !== undefined && code !== "") parts.push(`code=${code}`);
+
+  const cause = (err as { cause?: unknown }).cause;
+  if (cause !== undefined && cause !== null) {
+    const nested = formatTransportError(cause);
+    if (nested) parts.push(`cause=${nested}`);
+  }
+  return parts.join(" | ") || String(err);
+}
+
+/**
+ * 判断 EofOrTimeoutError。
+ * @param err - 输入：`unknown` — 错误对象
+ * @returns 输出：`boolean` — 条件成立返回 true，否则 false
+ */
+export function isEofOrTimeoutError(err: unknown): boolean {
+  const text = (formatTransportError(err) ?? "").toLowerCase();
+  if (!text) return false;
+  return /eof|timeout|timed out|econnreset|econnrefused|econnaborted|broken pipe|connection reset|connection closed|connection refused|unexpected eof|goaway|network|unreachable|host unreachable/.test(
+    text,
+  );
+}
+
+/**
+ * 判断 TimeoutError。
+ * @param err - 输入：`unknown` — 错误对象
+ * @returns 输出：`boolean` — 条件成立返回 true，否则 false
+ */
+export function isTimeoutError(err: unknown): boolean {
+  const text = (formatTransportError(err) ?? "").toLowerCase();
+  if (!text) return false;
+  return /timeout|timed out|err_timeout/.test(text);
+}
+
+/**
+ * 创建 HotConnectionPoolFromConfig。
+ * @returns 输出：`undefined | HotConnectionPool` — undefined | HotConnectionPool 实例
  */
 
 export function createHotConnectionPoolFromConfig(): HotConnectionPool | undefined {
@@ -543,11 +956,11 @@ export function createHotConnectionPoolFromConfig(): HotConnectionPool | undefin
 }
 
 /**
- * 根据 HTTP 状态分类预热结果。
- * @param status - 输入：`number` — HTTP 状态码
- * @param successStatus - 输入：`number` — 成功码（通常 200）
- * @param deniedStatuses - 输入：`readonly number[]` — 拒绝码（403/429）
- * @returns 输出：`WarmAttemptOutcome` — hot / denied / retry
+ * 执行 classifyWarmHttpStatus。
+ * @param status - 输入：`number` — status 参数
+ * @param successStatus - 输入：`number` — successStatus 参数
+ * @param deniedStatuses - 输入：`number[]` — deniedStatuses 参数
+ * @returns 输出：`"retry" | "hot" | "denied"` — "retry" | "hot" | "denied" 实例
  */
 
 export function classifyWarmHttpStatus(
@@ -565,11 +978,11 @@ export function classifyWarmHttpStatus(
 }
 
 /**
- * 汇总预热结果计数。
- * @param outcomes - 输入：`WarmAttemptOutcome[]` — 各 IP 结果
- * @param total - 输入：`number` — IP 总数
- * @param elapsedMs - 输入：`number` — 耗时
- * @returns 输出：`WarmupSummary` — 汇总
+ * 执行 summarizeOutcomes。
+ * @param outcomes - 输入：`"retry" | "hot" | "denied"[]` — outcomes 参数
+ * @param total - 输入：`number` — total 参数
+ * @param elapsedMs - 输入：`number` — elapsedMs 参数
+ * @returns 输出：`WarmupSummary` — WarmupSummary 实例
  */
 function summarizeOutcomes(
   outcomes: WarmAttemptOutcome[],

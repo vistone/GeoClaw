@@ -20,6 +20,7 @@ test("parseKhGoogleYaml 解析 ipv4 与 ipv6", () => {
   assert.equal(parsed.ipv6.length, 1);
   assert.equal(parsed.all.length, 3);
   assert.equal(parsed.ipv4[0]?.ip, "1.1.1.1");
+  assert.equal(parsed.ipv4[0]?.city, "A");
   assert.equal(parsed.ipv6[0]?.ip, "2001:db8::1");
 });
 

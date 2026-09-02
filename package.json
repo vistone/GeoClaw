@@ -1,6 +1,6 @@
 {
   "name": "geoclaw",
-  "version": "0.0.11",
+  "version": "0.0.18",
   "private": true,
   "type": "module",
   "description": "RockTree / GlobeTrotter protobuf codecs for Node",
@@ -32,6 +32,8 @@
     "inspect:fetch": "tsx scripts/inspect-fetch.ts",
     "benchmark:kh-ips": "tsx scripts/benchmark-kh-ips.ts",
     "warm:kh-ips": "tsx scripts/warm-kh-ips.ts",
+    "fetch:stats": "tsx scripts/fetch-stats.ts",
+    "flight:map": "tsx scripts/flight-map-server.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "jsdoc:gen": "tsx scripts/jsdoc-cli.ts gen",
     "jsdoc:check": "tsx scripts/jsdoc-cli.ts check",
@@ -43,12 +45,14 @@
   "dependencies": {
     "@bufbuild/protobuf": "^2.10.0",
     "node-wreq": "^3.2.0",
+    "ws": "^8.21.3",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@bufbuild/buf": "^1.57.2",
     "@bufbuild/protoc-gen-es": "^2.10.0",
     "@types/node": "^22.18.0",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2"
   },

@@ -7,6 +7,93 @@
 
 （尚无条目。）
 
+## [0.0.18] - 2026-09-02
+
+### 新增
+
+- `pickFairHotIp`：按 `assignCount` 均摊选路，同次数优先久未用的热连接
+- `HotFetchTimeoutError`：下载超时保留热连接；任务回队且不消耗 `attempts`
+- 预热 EOF/超时进入待预热队列，避免误踢热池
+- `IpFetchStatsStore`：按域名持久化全量 IP 请求统计；地图「重置统计」清 YAML + `assignCount` + IndexedDB
+- 飞行地图：WS Worker / IP Stats Worker；全量经 HTTP→IndexedDB，WS 只推摘要与增量
+- `warmPool.idleExpireMs`、`flightMap.stressTotal`（默认约 `max(hotCount*2, concurrency*2)`）
+
+### 变更
+
+- 下载超时默认 `timeoutMs: 2000`；超时不踢热池、空闲保活不踢
+- 热池 `runPool` / 压测与预热路径用 `setImmediate` 让出事件循环
+- 无 HTTP 状态码时记录真实 `error`，不再仅因缺状态码踢池
+- `ipinfo.token` 默认 `null`，勿提交密钥；用环境变量 `IPINFO_TOKEN`
+
+## [0.0.17] - 2026-09-02
+
+### 新增
+
+- MapLibre 飞行路线可视化：`npm run flight:map` → http://127.0.0.1:8765
+- `flightPathsToGeoJsonCollection`：航线 + 航点 GeoJSON
+- `flightMap` 配置段（端口、样式 URL、轮询间隔）
+
+## [0.0.16] - 2026-09-02
+
+### 新增
+
+- `IpInfoClient` / `FetchRouteResolver`：经 ipinfo.io 自动解析出口 IP 作为 origin
+- system DNS 路径下经 ipinfo 解析目标 IP/域名坐标
+- `ipinfo` 配置段；`fetchRoute.originMode: ipinfo`（默认）
+
+### 变更
+
+- 移除硬编码 `fetchRoute.origin` 坐标；origin 由出口 IP + ipinfo 动态获取
+- 环境变量 `IPINFO_TOKEN` 可覆盖 YAML 中的 token
+
+## [0.0.15] - 2026-09-02
+
+### 新增
+
+- `HostPinRegistry`：fetch 域名自动查找 `config/{hostname}.yaml`，无文件则系统 DNS
+- `FetchFlightPath`：飞行路线（origin → proxy → target 航点 + 航段耗时），可转 GeoJSON LineString 供地图绘制
+- `fetchRoute.origin` / `proxy.geo` 配置客户端与代理坐标
+- `WebFetchResult.flightPath` 与 `FetchMetrics.recentFlightPaths`
+
+## [0.0.14] - 2026-09-02
+
+### 新增
+
+- `FetchMetrics`：统一管理 fetch 请求量、成功率、失败码、IP、地区、耗时
+- `IpGeoRegistry`：从 kh.google.com.yaml 解析 IP 所属 city/region/country
+- `fetchMetrics` 配置段与 `npm run fetch:stats` 快照脚本
+- `WebFetch.getFetchMetrics()` 获取指标实例
+
+### 变更
+
+- `HostPinRecord` / `parseKhGoogleYaml` 解析完整 geo 字段
+- `FetchTaskPool` 每次尝试与最终请求结果写入指标
+
+## [0.0.13] - 2026-09-02
+
+### 新增
+
+- `HotConnectionPool.startInitialWarmup()`：后台异步首轮预热，HTTP 200 即时入热池
+- `HotConnectionPool.waitInitialWarmup()` / `isInitialWarmupInProgress()`：可选等待与进度查询
+- `warmPool.autoStartWarmup`：创建池后自动后台预热（默认 true）
+
+### 变更
+
+- 预热不再阻塞主流程；`runInitialWarmup()` 改为 start + wait 组合（兼容旧脚本 `--wait`）
+- `warm:kh-ips` 默认保持进程运行并实时打印 hot 计数
+
+## [0.0.12] - 2026-09-02
+
+### 新增
+
+- `ColdConnectionPool`：下载中 403/429 入冷池，禁止参与下载直至预热 HTTP 200
+- `warmPool.coldPoolStatuses` 配置项
+
+### 变更
+
+- `HotConnectionPool.fetchOnce` 遇 403/429 立即 `evictToColdPool`，仅后台预热成功可回热池
+- 后台重加热优先处理冷池到期 IP
+
 ## [0.0.11] - 2026-09-02
 
 ### 新增

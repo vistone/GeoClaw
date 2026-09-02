@@ -71,6 +71,77 @@ export type {
 
 export { FetchTaskPool } from "./fetch/FetchTaskPool.js";
 export type { FetchTaskPoolOptions, FetchTaskResult } from "./fetch/FetchTaskPool.js";
+
+export { ColdConnectionPool } from "./fetch/ColdConnectionPool.js";
+export type { ColdConnectionPoolOptions, ColdIpRecord } from "./fetch/ColdConnectionPool.js";
+
+export { FetchMetrics } from "./fetch/FetchMetrics.js";
+export {
+  createFetchMetricsFromConfig,
+  buildIpGeoRegistryFromConfig,
+  createIpFetchStatsStoreFromConfig,
+} from "./fetch/createFetchMetricsFromConfig.js";
+export { IpFetchStatsStore, normalizeHostname } from "./fetch/IpFetchStatsStore.js";
+export type { IpFetchStatRow, IpFetchStatsFile, IpFetchStatsSeedIp } from "./fetch/IpFetchStatsStore.js";
+export type {
+  FetchMetricsOptions,
+  FetchMetricsSnapshot,
+  FetchAttemptRecord,
+  FetchRequestRecord,
+  FetchAttemptOutcome,
+  FetchCounterBucket,
+} from "./fetch/FetchMetrics.js";
+export { IpGeoRegistry } from "./fetch/IpGeoRegistry.js";
+export type { IpGeoInfo } from "./fetch/IpGeoRegistry.js";
+
+export {
+  HostPinRegistry,
+  createHostPinRegistryFromConfig,
+} from "./fetch/HostPinRegistry.js";
+export type { HostPinRegistryResolve } from "./fetch/HostPinRegistry.js";
+
+export {
+  buildFetchFlightPath,
+  buildFlightPathsFromHotIps,
+  flightPathToGeoJsonLine,
+  flightPathsToGeoJsonCollection,
+  greatCircleArc,
+  leoOrbitalBowDeg,
+  mapDisplayArc,
+  parseLocString,
+  assignDistinctRouteVisuals,
+  routeColorFromIp,
+  routeColorFromRequestId,
+  routeVisualFromIp,
+  routeVisualFromRequestId,
+  filterFlightPathsByHotIps,
+  flightPathTargetIp,
+  splitLineAtAntimeridian,
+  unwrapWaypointsForDisplay,
+  angularDistanceRad,
+} from "./fetch/FetchFlightPath.js";
+export type {
+  FetchFlightPath,
+  FlightArcDisplayOptions,
+  GreatCircleArcOptions,
+  RouteVisualStyle,
+  FlightWaypoint,
+  FlightLeg,
+  FetchRouteOrigin,
+  FetchRouteOptions,
+  FlightPathGeoJson,
+} from "./fetch/FetchFlightPath.js";
+
+export {
+  createFetchRouteResolverFromConfig,
+  FetchRouteResolver,
+  ipInfoToOrigin,
+  ipInfoToHostPinRecord,
+} from "./fetch/FetchRouteResolver.js";
+
+export { IpInfoClient } from "./fetch/IpInfoClient.js";
+export type { IpInfoRecord, IpInfoClientOptions } from "./fetch/IpInfoClient.js";
+
 export {
   HotFetchNotOkError,
   HotFetchTransportError,
