@@ -1,0 +1,15 @@
+version: v2
+modules:
+  - path: rocktree/proto
+lint:
+  use:
+    - STANDARD
+  # 本文件对齐 Google Earth 官方 rocktree.proto 的历史命名与数值，
+  # 不能按 buf 现代风格改名/改零值，否则与线上 wire 不兼容。
+  except:
+    - PACKAGE_DIRECTORY_MATCH
+    - PACKAGE_VERSION_SUFFIX
+    - ENUM_VALUE_PREFIX
+    - ENUM_ZERO_VALUE_SUFFIX
+    - ENUM_FIRST_VALUE_ZERO
+    - FIELD_LOWER_SNAKE_CASE

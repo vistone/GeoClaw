@@ -1,0 +1,48 @@
+---
+description: GeoClaw TypeScript 严格标准、模块化分层与单职责约束
+globs: src/**/*.ts
+alwaysApply: true
+---
+
+# GeoClaw 开发约束
+
+完整说明见项目根目录 `DEVELOPMENT.md`。
+
+## 模块化（功能单一、可独立验证）
+
+- 分层：`core` → `codec` → `bulk` → `client` → `index`（门面）；**只允许向下依赖**。
+- 每文件一个业务类；职责见 DEVELOPMENT.md §1.4（输入 / 输出 / 不做什么）。
+- `codec/`、`bulk/`：**无 HTTP**，给定内存数据即可单测。
+- `client/`：只做 HTTP 编排，算法必须在下层。
+- `index.ts`：仅 re-export，禁止业务逻辑。
+
+## TypeScript（严格）
+
+- `strict: true`；禁止 `any`、`@ts-ignore`（`gen/` 除外）。
+- `NodeNext` + ESM + 相对路径 `.js` 后缀；`import type` 分离类型。
+- 禁止 `export default`；public API 显式类型 + 中文 JSDoc（见 `docs/JSDOC.md`）。
+- 提交前：`npm run typecheck` 与 `npm run jsdoc:check` 必须通过。
+
+## 日志
+
+- 使用 `Logger`：`debug` / `info` / `warn` / `error`；每类 `private static readonly logger = new Logger("ClassName")`。
+- DEBUG 下 public 方法须 `measureSync` / `measureAsync` 输出耗时（§4.1）。
+- 库代码禁止 `console.log`（`scripts/`、`test/` 除外）。
+
+## Rocktree 领域
+
+- `bulkEpoch` 仅用于 BulkMetadata URL；`epoch` 用于 NodeData。
+- `BulkData.nodes` = 有效数据节点（120）；`octants` = 树遍历（124）。
+
+## 版本与 CHANGELOG
+
+- 见 `DEVELOPMENT.md` §9；每次提交补丁位 +1，且 `CHANGELOG.md` 与 `package.json` 必须对齐。
+
+## AI 辅助开发
+
+- 见 `DEVELOPMENT.md` §10：**全局思考、最小变更、禁止破坏既有功能**。
+- 完成前必须：`typecheck` + `jsdoc:check` + `test` 全通过。
+
+## 调试与真实数据测试
+
+- 见 `DEVELOPMENT.md` §7：**禁止假数据、禁止猜测预期**；无数据须索取或 capture fixture。

@@ -1,0 +1,47 @@
+{
+  "GeoClaw 方法 JSDoc（标准）": {
+    "scope": "typescript",
+    "prefix": "gcdoc",
+    "description": "GeoClaw 扁平 JSDoc：明确输入/输出类型",
+    "body": [
+      "/**",
+      " * ${1:功能说明一句}。",
+      " * @param ${2:name} - 输入：`${3:Type}` — ${4:参数含义}",
+      " * @returns 输出：`${5:Type}` — ${6:返回值含义}",
+      " */"
+    ]
+  },
+  "GeoClaw 方法 JSDoc（含 throws）": {
+    "scope": "typescript",
+    "prefix": "gcdoce",
+    "description": "GeoClaw JSDoc + @throws",
+    "body": [
+      "/**",
+      " * ${1:功能说明一句}。",
+      " * @param ${2:name} - 输入：`${3:Type}` — ${4:参数含义}",
+      " * @returns 输出：`${5:Type}` — ${6:返回值含义}",
+      " * @throws {Error} ${7:抛错条件}",
+      " */"
+    ]
+  },
+  "GeoClaw void 方法 JSDoc": {
+    "scope": "typescript",
+    "prefix": "gcdocv",
+    "description": "GeoClaw 无返回值方法",
+    "body": [
+      "/**",
+      " * ${1:功能说明一句}。",
+      " * @param ${2:name} - 输入：`${3:Type}` — ${4:参数含义}",
+      " * @returns 输出：无（`void`）",
+      " */"
+    ]
+  },
+  "GeoClaw 导出类型字段": {
+    "scope": "typescript",
+    "prefix": "gctype",
+    "description": "GeoClaw 类型字段单行注释",
+    "body": [
+      "/** ${1:字段含义}；类型：`${2:Type}` */"
+    ]
+  }
+}

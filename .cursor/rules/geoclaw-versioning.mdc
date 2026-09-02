@@ -1,0 +1,26 @@
+---
+description: GeoClaw GitHub 版本号与 CHANGELOG 提交约束
+globs: CHANGELOG.md,package.json
+alwaysApply: true
+---
+
+# GeoClaw 版本与变更日志
+
+完整说明见 `DEVELOPMENT.md` §9。
+
+## 必须遵守
+
+- 使用 **GitHub** 管理版本；`package.json` 的 `version` 为权威版本号。
+- **初始版本** `0.0.1`；**每次提交** 补丁位 +1（`0.0.2`、`0.0.3` …）。
+- **每次提交** 必须同步更新 `CHANGELOG.md` 与 `package.json`，且版本号一致。
+- 提交前：在 `CHANGELOG.md` 的 `## [未发布]` 写变更 → bump version → 移动为 `## [x.y.z] - 日期` → 清空 `[未发布]`。
+
+## 禁止
+
+- 只改代码不改 CHANGELOG / version
+- CHANGELOG 版本与 `package.json` 不一致
+- 一次提交只改 version 不改 CHANGELOG（或反之）
+
+## Tag
+
+版本提交在 GitHub 打 tag：`v0.0.1`、`v0.0.2` …

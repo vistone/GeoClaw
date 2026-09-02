@@ -1,0 +1,32 @@
+---
+description: GeoClaw TypeScript 调试与真实数据测试——禁止假数据、禁止猜测预期
+globs: test/**/*.ts,scripts/**/*.ts,src/**/*.ts
+alwaysApply: true
+---
+
+# 调试与真实数据测试
+
+完整规范见 `DEVELOPMENT.md` §7、`test/fixtures/README.md`。
+
+## TypeScript 调试
+
+- 遵循 strict TS；禁止 `any` / `@ts-ignore` 掩盖错误
+- 使用 `Logger` + `GEOCLAW_LOG_LEVEL=debug`；**每个对象 public 方法** 须 `measureSync` / `measureAsync`
+- 日志含 `durationMs` 与真实输入 context，用于定位卡点，禁止乱猜
+- 禁止改断言让调试结果「假绿」
+
+## 真实数据（强制）
+
+- **每个函数** 的测试须用 **真实数据**：live（kh.google.com）或 `test/fixtures/` 捕获字节
+- **禁止**：手写 protobuf、mock 假响应、猜测 flags/节点数/epoch 当预期
+- **无数据时**：停止 → 运行 `fetch:planetoid` / `fetch:bulk` 或 **向用户索要样本** → 落盘 manifest → 再写测试
+
+## 测试分类
+
+- `*-live.test.ts`：线上真实拉取
+- `*.fixture.test.ts`：fixture 真实字节（须注释 manifest id）
+- 合成 roundtrip **不能** 证明 bulk/flags/path 等领域行为
+
+## 完成前
+
+`npm test` 通过且新增测试均注明 **数据来源**（URL 或 fixture id）。

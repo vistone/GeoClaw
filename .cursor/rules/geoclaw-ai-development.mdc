@@ -1,0 +1,38 @@
+---
+description: GeoClaw AI 辅助开发——全局思考、最小变更、禁止破坏既有功能
+alwaysApply: true
+---
+
+# AI 辅助开发约束
+
+完整说明见 `DEVELOPMENT.md` §10。
+
+## 接到新问题必须先做
+
+1. 读架构（§1）、目标模块、相关测试、CHANGELOG
+2. 定影响面：哪些 **已有功能** 不能动
+3. **最小 diff** 解决问题——不是重建功能
+
+## 绝对禁止
+
+- 把每个新问题当成「从零做新功能」、整文件/整模块重写
+- 修小问题却破坏已通过测试的 codec / bulk / client / index 行为
+- 删测试、删旧导出、改 Bulk 契约（nodes=120 等）来「让构建通过」
+- 未运行 `npm run typecheck` + `npm test` + `npm run jsdoc:check` 就声称完成
+- 扩大 scope：用户只问 A，顺带改无关的 B/C/D
+
+## 完成前必须
+
+```bash
+npm run typecheck && npm run jsdoc:check && npm test
+```
+
+公开 API 保持向后兼容；破坏性变更须用户确认并写 CHANGELOG。
+
+## 调试与测试
+
+- 见 `DEVELOPMENT.md` §7：真实数据强制；无数据 **向用户索要**，禁止猜测预期或假数据凑测试。
+
+## 回复要求
+
+简要说明：**改了什么、没改什么、如何证明未破坏旧功能、测试数据来源（URL / fixture id）**。

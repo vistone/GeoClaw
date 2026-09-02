@@ -1,0 +1,317 @@
+// RockTree / GlobeTrotter 3D 瓦片协议
+// 对齐官方 geo/globetrotter/proto/rocktree.proto 的字段号与嵌套结构
+syntax = "proto2";
+
+package geo_globetrotter_proto_rocktree;
+
+option go_package = "rocktree/pb";
+option java_package = "com.google.geo.globetrotter";
+
+// 数据集类型
+enum Dataset {
+  RT_3D = 0; // 标准 3D 网格（地形+建筑）
+  RT_HYBRID = 1; // 3D 与卫星影像混合
+  RT_TIME_MACHINE = 2; // 时间旅行（历史版本）
+}
+
+// 瓦片键矩形范围
+message TileKeyBounds {
+  optional uint32 level = 1; // 层级（0=根）
+  optional uint32 min_row = 2;
+  optional uint32 min_column = 3;
+  optional uint32 max_row = 4;
+  optional uint32 max_column = 5;
+}
+
+// KML 地理坐标（经纬高）
+message KmlCoordinate {
+  optional double latitude = 1; // 纬度（度）
+  optional double longitude = 2; // 经度（度）
+  optional double altitude = 3; // 海拔（米，相对 WGS84）
+}
+
+// 视口元数据请求
+message ViewportMetadataRequest {
+  optional uint32 epoch = 1;
+  repeated TileKeyBounds tile_key_bounds = 2;
+  optional bool omit_ancestors = 3;
+
+  optional BulkMetadataResponseMode bulk_metadata_response_mode = 4;
+  enum BulkMetadataResponseMode {
+    NONE = 0; // 不返回批量元数据
+    SPDY_PUSH = 1; // HTTP/2 Push
+    IN_VIEWPORT_METADATA = 2; // 嵌入本响应
+  }
+
+  repeated KmlCoordinate terrain_elevation_coords = 5; // 需查询高程的坐标
+  optional uint32 bulk_metadata_spdy_push_priority = 6 [default = 7];
+  optional string planetoid = 7; // 星球标识，如 Earth
+  optional Dataset dataset = 8;
+}
+
+// 视口元数据响应
+message ViewportMetadata {
+  optional PlanetoidMetadata planetoid_metadata = 1;
+  repeated NodeKey bulk_metadata_keys = 2;
+  repeated KmlCoordinate terrain_elevation_coords = 3;
+  repeated BulkMetadata bulk_metadata = 4;
+}
+
+// 批量元数据请求
+message BulkMetadataRequest {
+  optional NodeKey node_key = 1;
+  optional string planetoid = 2;
+  optional Dataset dataset = 3;
+}
+
+// 节点几何+纹理请求
+message NodeDataRequest {
+  optional NodeKey node_key = 1;
+  optional Texture.Format texture_format = 2;
+  optional uint32 imagery_epoch = 3;
+  optional bool omit_texture = 4; // true=只下几何
+  optional int32 date = 5; // 时间旅行日期 YYYYMMDD；-1=最新
+  optional int32 milliseconds = 6;
+  optional bool texture_is_shared = 7;
+  optional string planetoid = 8;
+  optional Dataset dataset = 9;
+}
+
+// 节点键：路径 + 版本
+message NodeKey {
+  optional string path = 1; // 四叉树路径，如 "040213"
+  optional uint32 epoch = 2;
+}
+
+// 版权请求
+message CopyrightRequest {
+  optional uint32 epoch = 1;
+  optional string planetoid = 2;
+  optional Dataset dataset = 3;
+}
+
+// 单独纹理请求
+message TextureDataRequest {
+  optional NodeKey node_key = 1;
+  optional Texture.Format texture_format = 2;
+  optional Texture.ViewDirection view_direction = 3;
+  optional uint32 imagery_epoch = 4;
+  optional string planetoid = 5;
+  optional Dataset dataset = 6;
+}
+
+// 批量节点元数据
+message BulkMetadata {
+  repeated NodeMetadata node_metadata = 1;
+  optional NodeKey head_node_key = 2;
+  repeated double head_node_center = 3 [packed = true]; // 头节点中心 [x,y,z]
+  repeated float meters_per_texel = 4 [packed = true]; // 各级纹素分辨率
+  optional uint32 default_imagery_epoch = 5;
+  optional uint32 default_available_texture_formats = 6; // 位掩码：bit(Format-1)
+  optional uint32 default_available_view_dependent_textures = 7;
+  optional uint32 default_available_view_dependent_texture_formats = 8;
+  repeated DatedNode common_dated_nodes = 9;
+  optional AcquisitionDateRange default_acquisition_date_range = 10;
+  repeated DatedCopyright default_dated_copyrights = 11;
+  optional NodeMetadata.OctantType default_octant_type = 12;
+}
+
+// 单节点元数据（不含几何）
+message NodeMetadata {
+  optional uint32 path_and_flags = 1; // 低位 flags，高位路径
+  optional uint32 epoch = 2;
+  optional bytes oriented_bounding_box = 3; // OBB，通常 32 字节
+  optional float meters_per_texel = 4;
+  optional uint32 bulk_metadata_epoch = 5;
+  repeated double processing_oriented_bounding_box = 6 [packed = true];
+  optional uint32 imagery_epoch = 7;
+  optional uint32 available_texture_formats = 8; // 位掩码，非枚举号
+  optional uint32 available_view_dependent_textures = 9;
+  optional uint32 available_view_dependent_texture_formats = 10;
+  repeated DatedNode dated_nodes = 11;
+  optional AcquisitionDateRange acquisition_date_range = 12;
+  optional uint32 restrictions = 13;
+  optional OctantType octant_type = 14;
+
+  // 八分树细分策略
+  enum OctantType {
+    DEFAULT_OCTANTS = 0;
+    NO_OCTANTS = 1;
+    OCTANTS_WITHOUT_SKIRTS = 2;
+  }
+
+  // path_and_flags 中的标志位（可按位或）
+  enum Flags {
+    RICH3D_LEAF = 1;
+    RICH3D_NODATA = 2;
+    LEAF = 4;
+    NODATA = 8;
+    USE_IMAGERY_EPOCH = 16;
+  }
+
+  // 数据合规限制
+  enum Restrictions {
+    NONE = 0;
+    SOUTH_KOREA = 1;
+  }
+}
+
+// 时间旅行：某日期对应的节点版本
+message DatedNode {
+  optional uint32 date = 1; // YYYYMMDD
+  optional uint32 milliseconds = 2;
+  optional int32 epoch = 3;
+  optional int32 coarse_level = 4;
+  optional int32 shared_epoch = 5;
+  optional int32 copyright = 6; // 关联 Copyright.id
+}
+
+// 时间旅行：某日期对应的版权
+message DatedCopyright {
+  optional uint32 date = 1;
+  optional uint32 milliseconds = 2;
+  optional int32 copyright = 3;
+}
+
+message AcquisitionDate {
+  optional uint32 date = 1; // YYYYMMDD
+  optional uint32 milliseconds = 2;
+}
+
+message AcquisitionDateRange {
+  optional AcquisitionDate begin = 1;
+  optional AcquisitionDate end = 2;
+}
+
+// 节点几何响应
+message NodeData {
+  repeated double matrix_globe_from_mesh = 1 [packed = true]; // 4x4，mesh→Globe
+  repeated Mesh meshes = 2;
+  repeated uint32 copyright_ids = 3; // 非 packed（与官方 EXPANDED 一致）
+  optional NodeKey node_key = 4;
+  repeated double kml_bounding_box = 5 [packed = true]; // [minX,minY,maxX,maxY]
+  optional Mesh water_mesh = 6;
+  repeated Mesh overlay_surface_meshes = 7;
+  optional bytes normal_table = 8;
+}
+
+// 网格几何
+message Mesh {
+  optional bytes vertices = 1;
+  optional bytes texture_coords = 2;
+  optional bytes indices = 3;
+  optional bytes octant_ranges = 4;
+  optional bytes layer_counts = 5;
+  repeated Texture texture = 6;
+  optional bytes texture_coordinates = 7; // 备用/废弃 UV
+  optional bytes layer_and_octant_counts = 8;
+  optional bytes vertex_alphas = 9;
+  repeated float uv_offset_and_scale = 10 [packed = true]; // [ou,ov,su,sv]
+  optional bytes normals = 11;
+  optional uint32 mesh_id = 12;
+  optional bytes skirt_flags = 13;
+  optional bytes normals_dev = 16;
+
+  // 网格语义图层
+  enum Layer {
+    OVERGROUND = 0; // 地表以上（建筑等）
+    TERRAIN_BELOW_WATER = 1;
+    TERRAIN_ABOVE_WATER = 2;
+    TERRAIN_HIDDEN = 3;
+    WATER = 4;
+    WATER_SKIRTS = 5;
+    WATER_SKIRTS_INVERTED = 6;
+    OVERLAY_SURFACE = 7;
+    OVERLAY_SURFACE_SKIRTS = 8;
+    NUM_LAYERS = 9;
+  }
+
+  // 图层组合掩码
+  enum LayerMask {
+    TERRAIN_WITH_OVERGROUND = 7; // 0|1|2
+    TERRAIN_WITHOUT_WATER = 14; // 1|2|3
+    TERRAIN_WITH_WATER = 28; // 1|2|3|4
+    WATER_WITH_SKIRTS = 112; // 4|5|6
+    OVERLAY_WITH_SKIRTS = 384; // 7|8
+  }
+}
+
+// 纹理块
+message Texture {
+  repeated bytes data = 1;
+
+  optional Format format = 2;
+  enum Format {
+    JPG = 1;
+    DXT1 = 2;
+    ETC1 = 3;
+    PVRTC2 = 4;
+    PVRTC4 = 5;
+    CRN_DXT1 = 6;
+    KTX2_ETC1S = 7;
+    reserved 8, 9;
+    HETC2 = 10;
+  }
+
+  optional uint32 width = 3 [default = 256];
+  optional uint32 height = 4 [default = 256];
+
+  optional ViewDirection view_direction = 5;
+  enum ViewDirection {
+    ANY = 0;
+    NADIR = 1; // 天底
+    NORTH_45 = 2;
+    EAST_45 = 3;
+    SOUTH_45 = 4;
+    WEST_45 = 5;
+  }
+
+  optional uint32 mesh_id = 6;
+  optional QualityMeasurements measurement_data = 7;
+}
+
+message QualityMeasurements {
+  optional double psnr = 1; // dB
+}
+
+// 纹理响应
+message TextureData {
+  optional NodeKey node_key = 1;
+  repeated Texture textures = 2;
+
+  repeated TransformInfo transform_info = 3;
+  message TransformInfo {
+    optional bytes transform_table = 1;
+    optional bytes vertex_transform_map = 2;
+    optional uint32 mesh_id = 3;
+  }
+
+  repeated float projection_origin = 4 [packed = true];
+}
+
+message Copyrights {
+  repeated Copyright copyrights = 1;
+}
+
+message Copyright {
+  optional uint32 id = 1;
+  optional string text = 2; // 可能含 HTML
+  optional string text_clean = 3; // 纯文本
+}
+
+// 星球全局元数据请求
+message PlanetoidMetadataRequest {
+  optional string planetoid = 1;
+  optional Dataset dataset = 2;
+  reserved 3, 4;
+  optional int32 epoch = 5; // -1=最新
+}
+
+// 星球全局元数据
+message PlanetoidMetadata {
+  optional NodeMetadata root_node_metadata = 1;
+  optional float radius = 2; // 米
+  optional float min_terrain_altitude = 3;
+  optional float max_terrain_altitude = 4;
+  optional uint32 DEPRECATED_max_imagery_epoch = 5 [deprecated = true];
+}

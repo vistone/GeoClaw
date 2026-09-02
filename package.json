@@ -1,0 +1,54 @@
+{
+  "name": "geoclaw",
+  "version": "0.0.2",
+  "private": true,
+  "type": "module",
+  "description": "RockTree / GlobeTrotter protobuf codecs for Node",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./gen/*": {
+      "types": "./dist/gen/*.d.ts",
+      "import": "./dist/gen/*.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "rocktree/proto",
+    "buf.yaml",
+    "buf.gen.yaml"
+  ],
+  "scripts": {
+    "generate": "buf generate",
+    "build": "npm run generate && tsc -p tsconfig.json",
+    "test": "tsx --test test/**/*.test.ts",
+    "fetch:planetoid": "tsx scripts/fetch-planetoid.ts",
+    "fetch:bulk": "tsx scripts/fetch-bulk.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "jsdoc:gen": "tsx scripts/jsdoc-cli.ts gen",
+    "jsdoc:check": "tsx scripts/jsdoc-cli.ts check",
+    "jsdoc:md": "tsx scripts/jsdoc-cli.ts md"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.10.0",
+    "header-generator": "^2.1.88"
+  },
+  "devDependencies": {
+    "@bufbuild/buf": "^1.57.2",
+    "@bufbuild/protoc-gen-es": "^2.10.0",
+    "@types/node": "^22.18.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  },
+  "allowScripts": {
+    "@bufbuild/buf@1.72.0": true,
+    "esbuild@0.28.2": true
+  }
+}

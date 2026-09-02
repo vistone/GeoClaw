@@ -1,0 +1,31 @@
+---
+description: GeoClaw JSDoc 标准格式与生成命令
+globs: src/**/*.ts
+alwaysApply: true
+---
+
+# JSDoc 标准（扁平、明确）
+
+完整规范见 `DEVELOPMENT.md` §3、`docs/JSDOC.md`。
+
+## 格式（固定）
+
+```typescript
+/**
+ * 一句功能说明。
+ * @param name - 输入：`Type` — 参数含义（禁止含糊词）
+ * @returns 输出：`Type` — 返回值含义
+ * @throws {Error} 仅在有 throw 时写清条件
+ */
+```
+
+- **必须** `输入：` / `输出：` 前缀 + 反引号类型名
+- **禁止** 嵌套列表、多层缩进说明、「等 / 相关 / 可能」等含糊词
+- 复杂结构 **只引用** 已 export 的类型名，不在 JSDoc 内展开字段
+
+## 快速生成
+
+- 编辑器输入 `gcdoc` / `gcdoce` / `gcdocv`（见 `.vscode/geoclaw-jsdoc.code-snippets`）
+- `npm run jsdoc:gen` — 打印 stub
+- `npm run jsdoc:gen -- --write` — 写入缺失 JSDoc
+- `npm run jsdoc:check` — 提交前校验

@@ -1,0 +1,54 @@
+# 变更日志
+
+本文件记录 GeoClaw 每个版本的变更，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
+版本号遵循 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/) 的 **补丁位递增** 策略（见 `DEVELOPMENT.md` §9）。
+
+## [未发布]
+
+（尚无条目。）
+
+## [0.0.2] - 2026-09-02
+
+### 新增
+
+- `fetch/` 层：`WebFetch`（通用 GET 字节拉取）与 `BrowserFingerprintCodec`（header-generator 浏览器指纹）
+- `RocktreeApi`：Rocktree 业务编排，HTTP 委托 `WebFetch`
+- 可配置 `fingerprint`、`contextHeaders`、`headerOverrides` 与单次请求 `headers`
+- `test/web-fetch.test.ts`：指纹与 header 覆盖单元测试
+
+### 变更
+
+- 移除 `RocktreeClient`；`RocktreeClient` / `rocktreeClient` / `createRocktreeClient` 保留为 `@deprecated` 别名
+
+### 修复
+
+- （无）
+
+### 移除
+
+- `src/client/RocktreeClient.ts`（职责拆分为 `fetch/WebFetch` + `client/RocktreeApi`）
+
+## [0.0.1] - 2026-09-02
+
+### 新增
+
+- RockTree / GlobeTrotter Protobuf 编解码（`buf generate` + `@bufbuild/protobuf`）
+- 单文件单类对象架构：`codec/`、`bulk/`、`client/`、`core/Logger`
+- `RocktreeClient`：拉取 PlanetoidMetadata、BulkMetadata、BulkData
+- Bulk 解析对齐 earth-3d：`BulkData`（nodes=120、octants=124、bulks=88）
+- 节点 flags 解码、`bulkEpoch` / `epoch` / `imageryEpoch` 命名约定
+- OBB、LatLonBox、纹理元数据解析
+- 开发规范 `DEVELOPMENT.md` 与 Cursor 规则
+- 单元测试与 kh.google.com 线上集成测试
+
+### 变更
+
+- （初始版本，无）
+
+### 修复
+
+- （初始版本，无）
+
+### 移除
+
+- （初始版本，无）
