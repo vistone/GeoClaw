@@ -1,6 +1,6 @@
 {
   "name": "geoclaw",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "private": true,
   "type": "module",
   "description": "RockTree / GlobeTrotter protobuf codecs for Node",
@@ -25,7 +25,7 @@
   ],
   "scripts": {
     "generate": "buf generate",
-    "build": "npm run generate && tsc -p tsconfig.json",
+    "build": "npm run generate && tsc -p tsconfig.json && cp src/fetch/kh.google.com.yaml dist/fetch/",
     "test": "tsx --test test/**/*.test.ts",
     "fetch:planetoid": "tsx scripts/fetch-planetoid.ts",
     "fetch:bulk": "tsx scripts/fetch-bulk.ts",

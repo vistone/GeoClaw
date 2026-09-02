@@ -1069,6 +1069,103 @@ unpackTextureFormat(availableTextureFormats: undefined | number, defaultAvailabl
 
 ## L4 HTTP 抓取 fetch
 
+### HostPinPool
+
+源文件：[`src/fetch/HostPinPool.ts`](../src/fetch/HostPinPool.ts)
+
+从 kh.google.com.yaml 加载 IP 并按轮询分配（绕过 DNS 解析）。
+
+#### HostPinPool 构造函数
+
+```typescript
+constructor(options: HostPinPoolOptions)
+```
+
+| 参数 | 说明 |
+|------|------|
+| `options` | 输入：`HostPinPoolOptions` — 域名、YAML 路径或预置 IP |
+
+<details><summary>原始 JSDoc</summary>
+
+```typescript
+/**
+   * @param options - 输入：`HostPinPoolOptions` — 域名、YAML 路径或预置 IP
+   */
+```
+
+</details>
+
+#### HostPinPool.nextIp
+
+```typescript
+nextIp(): string
+```
+
+轮询取下一条 IP。
+
+**返回：** 输出：`string` — IPv4 或 IPv6 地址
+
+**抛出：** {Error} 池为空时
+
+<details><summary>原始 JSDoc</summary>
+
+```typescript
+/**
+   * 轮询取下一条 IP。
+   * @returns 输出：`string` — IPv4 或 IPv6 地址
+   * @throws {Error} 池为空时
+   */
+```
+
+</details>
+
+#### HostPinPool.resolveForUrl
+
+```typescript
+resolveForUrl(url: string): undefined | HostPinResolveResult
+```
+
+若 URL 主机名匹配池域名，生成 node-wreq dns.hosts（单 IP，无 DNS 查询）。
+
+| 参数 | 说明 |
+|------|------|
+| `url` | 输入：`string` — 请求 URL |
+
+**返回：** 输出：`HostPinResolveResult | undefined` — 不匹配时 undefined
+
+<details><summary>原始 JSDoc</summary>
+
+```typescript
+/**
+   * 若 URL 主机名匹配池域名，生成 node-wreq dns.hosts（单 IP，无 DNS 查询）。
+   * @param url - 输入：`string` — 请求 URL
+   * @returns 输出：`HostPinResolveResult | undefined` — 不匹配时 undefined
+   */
+```
+
+</details>
+
+#### HostPinPool.size
+
+```typescript
+size(): number
+```
+
+返回池中 IP 数量（懒加载 YAML）。
+
+**返回：** 输出：`number` — 可用 IP 数
+
+<details><summary>原始 JSDoc</summary>
+
+```typescript
+/**
+   * 返回池中 IP 数量（懒加载 YAML）。
+   * @returns 输出：`number` — 可用 IP 数
+   */
+```
+
+</details>
+
 ### TlsFingerprintCodec
 
 源文件：[`src/fetch/TlsFingerprintCodec.ts`](../src/fetch/TlsFingerprintCodec.ts)
@@ -1512,6 +1609,34 @@ logLevelFromEnv(): DEBUG | INFO | WARN | …
 
 </details>
 
+*源文件：`src/fetch/HostPinPool.ts`*
+
+#### parseKhGoogleYaml
+
+```typescript
+parseKhGoogleYaml(yamlText: string): object
+```
+
+解析 kh.google.com.yaml 中的 ipv4 / ipv6 列表。
+
+| 参数 | 说明 |
+|------|------|
+| `yamlText` | 输入：`string` — YAML 全文 |
+
+**返回：** 输出：`{ ipv4, ipv6, all }` — 分族与合并列表
+
+<details><summary>原始 JSDoc</summary>
+
+```typescript
+/**
+ * 解析 kh.google.com.yaml 中的 ipv4 / ipv6 列表。
+ * @param yamlText - 输入：`string` — YAML 全文
+ * @returns 输出：`{ ipv4, ipv6, all }` — 分族与合并列表
+ */
+```
+
+</details>
+
 *源文件：`src/fetch/TlsFingerprintCodec.ts`*
 
 #### mergeBrowserEmulation
@@ -1770,4 +1895,4 @@ headersToRecord(headers: object): Record<string, string>
 
 ---
 
-共 **16** 个类、**61** 个 public API。
+共 **17** 个类、**66** 个 public API。

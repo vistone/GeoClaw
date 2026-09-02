@@ -105,6 +105,7 @@ flowchart BT
 
 | 文件 | 职责 | 输入 → 输出 | 不做 |
 |------|------|-------------|------|
+| `HostPinPool.ts` | 从 YAML 加载 IP 并轮询 `dns.hosts` 直连 | hostname + YAML → 单 IP pin | TLS 握手、HTTP 请求 |
 | `TlsFingerprintCodec.ts` | 解析 node-wreq TLS 浏览器 profile 并合并附加请求头 | profile / context / overrides → browser + Headers | 原生 TLS 握手（由 node-wreq 负责） |
 | `WebFetch.ts` | 带 TLS 指纹的 GET 字节拉取（默认 node-wreq） | URL + header 覆盖 → Uint8Array | Rocktree 业务、Bulk 解析 |
 

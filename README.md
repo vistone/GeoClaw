@@ -2,7 +2,7 @@
 
 Google Earth **RockTree / GlobeTrotter** 的 Node.js TypeScript 工具库：Protobuf 编解码、Bulk 元数据解析，以及带 **TLS 浏览器指纹**（JA3/JA4/HTTP2）的 HTTP 抓取。
 
-当前版本：**0.0.5**
+当前版本：**0.0.6**
 
 ## 特性
 
@@ -131,6 +131,31 @@ GEOCLAW_LOG_LEVEL=debug npm run fetch:planetoid
 
 ```bash
 npm test   # 含 test/web-fetch-transport-live.test.ts，对 kh.google.com 断言 node-wreq + TLS
+```
+
+## HostPin（跳过 DNS，IP 轮询）
+
+`src/fetch/kh.google.com.yaml` 含 `kh.google.com` 全球 IPv4/IPv6。`WebFetch` **默认**每次请求轮询取一个 IP，通过 node-wreq `dns.hosts` 直连，**不经过系统 DNS**。
+
+```typescript
+import { createWebFetch, khGoogleHostPinPool } from "geoclaw";
+
+// 默认已启用 khGoogleHostPinPool
+const wf = createWebFetch();
+
+// 关闭 HostPin，恢复系统 DNS
+const wfDns = createWebFetch({ hostPinPool: false });
+
+// 自定义池
+const pool = new HostPinPool({ hostname: "kh.google.com", family: "ipv4" });
+const wfV4 = createWebFetch({ hostPinPool: pool });
+
+const { trace } = await wf.getBytesWithTrace(url, { trace: true });
+console.log(trace.pinnedIp, trace.dnsPinned); // 本次轮询到的 IP
+```
+
+```bash
+npm run inspect:fetch   # 输出 pinnedIp
 ```
 
 ## Rocktree API

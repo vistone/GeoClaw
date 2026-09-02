@@ -7,6 +7,26 @@
 
 （尚无条目。）
 
+## [0.0.6] - 2026-09-02
+
+### 新增
+
+- `HostPinPool`：从 `src/fetch/kh.google.com.yaml` 加载全球 IPv4/IPv6，轮询 `dns.hosts` 直连（跳过 DNS）
+- `WebFetch` 默认对 `kh.google.com` 启用 HostPin；trace 增加 `pinnedIp`、`dnsPinned`
+- `test/host-pin-pool.test.ts`：轮询与 YAML 解析测试
+
+### 变更
+
+- `npm run build` 复制 `kh.google.com.yaml` 至 `dist/fetch/`
+
+### 修复
+
+- （无）
+
+### 移除
+
+- （无）
+
 ## [0.0.5] - 2026-09-02
 
 ### 新增

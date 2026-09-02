@@ -2,6 +2,10 @@ import { fetch as wreqFetch, type RequestStats, type RequestTimings } from "node
 
 import { Logger } from "../core/Logger.js";
 import {
+  HostPinPool,
+  khGoogleHostPinPool,
+} from "./HostPinPool.js";
+import {
   EARTH_WEB_CONTEXT_HEADERS,
   TlsFingerprintCodec,
   tlsFingerprintCodec,
@@ -43,6 +47,12 @@ export type FetchTransportTrace = {
   };
   /** 响应头是否呈 HTTP/2 常见形态（全小写键名，启发式） */
   likelyHttp2Response: boolean;
+  /** 请求 URL 主机名 */
+  requestHostname?: string;
+  /** dns.hosts 绑定的 IP（轮询结果） */
+  pinnedIp?: string;
+  /** 是否绕过系统 DNS（使用 YAML HostPin） */
+  dnsPinned: boolean;
 };
 
 /** GET 结果：字节 + 传输追踪 */
@@ -77,6 +87,8 @@ export type WebFetchOptions = {
   timeout?: number;
   /** 默认开启传输 trace 日志（DEBUG 级别） */
   logTransportTrace?: boolean;
+  /** HostPin 池；false 关闭；默认 kh.google.com YAML 轮询 */
+  hostPinPool?: HostPinPool | false;
 };
 
 /**
@@ -89,6 +101,7 @@ export class WebFetch {
   > &
     Pick<WebFetchOptions, "fetch" | "tlsFingerprint" | "timeout"> & {
       tlsFingerprintCodec: TlsFingerprintCodec;
+      hostPinPool?: HostPinPool;
     };
 
   /**
@@ -105,6 +118,8 @@ export class WebFetch {
       tlsFingerprintCodec: options.tlsFingerprintCodec ?? tlsFingerprintCodec,
       timeout: options.timeout,
       logTransportTrace: options.logTransportTrace ?? false,
+      hostPinPool:
+        options.hostPinPool === false ? undefined : (options.hostPinPool ?? khGoogleHostPinPool),
     };
   }
 
@@ -141,12 +156,14 @@ export class WebFetch {
         const browser = this.resolveBrowser(getOptions);
         const extraHeaders = this.buildHeaders(getOptions);
         const collectTls = getOptions.trace ?? this.options.logTransportTrace;
+        const hostPin = this.options.hostPinPool?.resolveForUrl(url);
 
         WebFetch.logger.debug("发起 TLS GET", {
           url,
           transport,
           browser,
           extraHeaderKeys: Object.keys(extraHeaders),
+          pinnedIp: hostPin?.pinnedIp,
         });
 
         let stats: RequestStats | undefined;
@@ -155,6 +172,7 @@ export class WebFetch {
           browser,
           headers: extraHeaders,
           ...(this.options.timeout !== undefined ? { timeout: this.options.timeout } : {}),
+          ...(hostPin ? { dns: hostPin.dns } : {}),
           ...(collectTls ? { tlsDebug: { peerCertificates: true } } : {}),
           onStats: (s: RequestStats) => {
             stats = s;
@@ -178,6 +196,9 @@ export class WebFetch {
           bodyBytes: buf.length,
           timings: res.wreq.timings ?? stats?.timings,
           tlsPeer: res.wreq.tls,
+          requestHostname: hostPin?.hostname ?? new URL(url).hostname,
+          pinnedIp: hostPin?.pinnedIp,
+          dnsPinned: Boolean(hostPin),
         });
 
         if (this.options.logTransportTrace || getOptions.trace) {
@@ -282,6 +303,9 @@ function buildTransportTrace(args: {
   bodyBytes: number;
   timings?: RequestTimings;
   tlsPeer?: { peerCertificate?: Uint8Array; peerCertificateChain?: Uint8Array[] };
+  requestHostname?: string;
+  pinnedIp?: string;
+  dnsPinned: boolean;
 }): FetchTransportTrace {
   const responseHeaderKeys = Object.keys(args.responseHeaders);
   const likelyHttp2Response =
@@ -307,6 +331,9 @@ function buildTransportTrace(args: {
         }
       : undefined,
     likelyHttp2Response,
+    requestHostname: args.requestHostname,
+    pinnedIp: args.pinnedIp,
+    dnsPinned: args.dnsPinned,
   };
 }
 

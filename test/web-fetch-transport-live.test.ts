@@ -16,9 +16,12 @@ test("WebFetch live transport trace against kh.google.com", async () => {
   assert.ok(bytes.length > 0);
   assert.ok(trace.tlsPeer?.hasCertificate);
   assert.ok((trace.tlsPeer?.chainLength ?? 0) >= 1);
+  assert.equal(trace.dnsPinned, true);
+  assert.ok(trace.pinnedIp);
+  assert.equal(trace.requestHostname, "kh.google.com");
   assert.ok(trace.timings && trace.timings.wait >= 0);
 
   console.log(
-    `[transport] node-wreq profile=${JSON.stringify(trace.browser)} http2=${trace.http2FingerprintEnabled} likelyH2=${trace.likelyHttp2Response} waitMs=${trace.timings?.wait} bytes=${bytes.length}`,
+    `[transport] node-wreq profile=${JSON.stringify(trace.browser)} pinnedIp=${trace.pinnedIp} http2=${trace.http2FingerprintEnabled} likelyH2=${trace.likelyHttp2Response} waitMs=${trace.timings?.wait} bytes=${bytes.length}`,
   );
 });

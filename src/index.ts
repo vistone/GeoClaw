@@ -75,6 +75,17 @@ export type {
 } from "./fetch/TlsFingerprintCodec.js";
 
 export {
+  HostPinPool,
+  khGoogleHostPinPool,
+  parseKhGoogleYaml,
+} from "./fetch/HostPinPool.js";
+export type {
+  HostPinPoolOptions,
+  HostPinRecord,
+  HostPinResolveResult,
+} from "./fetch/HostPinPool.js";
+
+export {
   RocktreeApi,
   rocktreeApi,
   createRocktreeApi,
