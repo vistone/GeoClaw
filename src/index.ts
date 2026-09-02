@@ -14,7 +14,9 @@ import {
 } from "./gen/rocktree_pb.js";
 
 export type { BytesLike } from "./core/BytesLike.js";
-export { Logger, LogLevel, logLevelFromEnv } from "./core/Logger.js";
+export { Logger, LogLevel, logLevelFromString } from "./core/Logger.js";
+export { GeoClawConfig, geoclawConfig } from "./core/GeoClawConfig.js";
+export type { GeoClawConfigFile } from "./core/GeoClawConfig.js";
 
 export {
   BulkMetadataRequestSchema,
@@ -54,17 +56,21 @@ export { TextureMetadataParser, textureMetadataParser } from "./bulk/TextureMeta
 export {
   WebFetch,
   webFetch,
+  getWebFetch,
   createWebFetch,
-  EARTH_WEB_CONTEXT_HEADERS,
+  resolveProxyUrl,
 } from "./fetch/WebFetch.js";
-export type { WebFetchOptions, WebFetchGetOptions, TlsFetchFn, FetchTransportTrace, WebFetchResult, ProxyMode } from "./fetch/WebFetch.js";
-export { DEFAULT_GEOCLAW_PROXY, resolveProxyUrl } from "./fetch/WebFetch.js";
+export type {
+  WebFetchOptions,
+  WebFetchGetOptions,
+  TlsFetchFn,
+  FetchTransportTrace,
+  WebFetchResult,
+} from "./fetch/WebFetch.js";
+export type { ProxyMode } from "./fetch/FetchTypes.js";
 
 export {
   TlsFingerprintCodec,
-  tlsFingerprintCodec,
-  DEFAULT_TLS_FINGERPRINT,
-  DEFAULT_TLS_BROWSER_PROFILE,
   BROWSER_TLS_PROFILES,
 } from "./fetch/TlsFingerprintCodec.js";
 export type {
@@ -77,7 +83,7 @@ export type {
 
 export {
   HostPinPool,
-  khGoogleHostPinPool,
+  createHostPinPoolFromConfig,
   parseKhGoogleYaml,
 } from "./fetch/HostPinPool.js";
 export type {
@@ -89,11 +95,11 @@ export type {
 export {
   RocktreeApi,
   rocktreeApi,
+  getRocktreeApi,
   createRocktreeApi,
   fetchPlanetoidMetadata,
   fetchBulkMetadata,
   fetchBulkData,
-  DEFAULT_ROCKTREE_BASE,
   /** @deprecated 使用 RocktreeApi */
   RocktreeClient,
   /** @deprecated 使用 rocktreeApi */

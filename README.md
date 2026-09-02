@@ -2,7 +2,38 @@
 
 Google Earth **RockTree / GlobeTrotter** 的 Node.js TypeScript 工具库：Protobuf 编解码、Bulk 元数据解析，以及带 **TLS 浏览器指纹**（JA3/JA4/HTTP2）的 HTTP 抓取。
 
-当前版本：**0.0.8**
+当前版本：**0.0.9**
+
+## 配置（config/geoclaw.yaml）
+
+**所有可调参数在外部 YAML 配置，不在代码里写死。** 默认读取项目根 `config/geoclaw.yaml`；可通过环境变量切换：
+
+```bash
+export GEOCLAW_CONFIG=/path/to/my-geoclaw.yaml
+```
+
+主要配置段：
+
+| 段 | 说明 |
+|----|------|
+| `log.level` | debug / info / warn / error |
+| `rocktree.baseUrl` | Rocktree API 根 URL |
+| `fetch.contextHeaders` | Origin、Referer 等 |
+| `tls.profile` | node-wreq 浏览器 profile（如 `chrome_128`） |
+| `proxy.url` / `proxy.mode` | SOCKS5 代理与 `auto`（IPv6 走代理） |
+| `hostPin.ipsFile` | IP 列表 YAML（默认 `config/kh.google.com.yaml`） |
+| `benchmark.*` | IP 测速脚本默认并发与超时 |
+
+代码读取：
+
+```typescript
+import { GeoClawConfig, createWebFetch } from "geoclaw";
+
+const cfg = GeoClawConfig.get();
+console.log(cfg.getTlsFingerprint(), cfg.getProxyUrl());
+
+const wf = createWebFetch(); // 未传字段均来自 YAML
+```
 
 ## 特性
 
@@ -62,18 +93,17 @@ Node 内置 `fetch` 使用 OpenSSL，**无法**伪造 JA3/JA4/HTTP2 指纹。Geo
 import {
   createWebFetch,
   BROWSER_TLS_PROFILES,
-  EARTH_WEB_CONTEXT_HEADERS,
+  GeoClawConfig,
 } from "geoclaw";
 
 const fetch = createWebFetch({
-  // TLS profile：100+ 内置，如 chrome_128、firefox_135
+  // 省略字段时从 config/geoclaw.yaml 读取
   tlsFingerprint: {
     profile: "chrome_131",
     platform: "linux",
     http2: true,
     headers: true,
   },
-  contextHeaders: EARTH_WEB_CONTEXT_HEADERS,
   headerOverrides: {
     "Accept-Language": "zh-CN,zh",
   },
@@ -81,6 +111,7 @@ const fetch = createWebFetch({
 
 const bytes = await fetch.getBytes("https://example.com/data");
 console.log(BROWSER_TLS_PROFILES.includes("chrome_131"));
+console.log(GeoClawConfig.get().getContextHeaders());
 ```
 
 Header 合并优先级：**node-wreq profile 默认头 → contextHeaders → headerOverrides → 单次 headers**。Protobuf 响应默认强制 `Accept-Encoding: identity`。
@@ -123,8 +154,10 @@ console.log(trace.likelyHttp2Response); // 响应头全小写 → 多为 HTTP/2
 
 ### DEBUG 日志
 
+修改 `config/geoclaw.yaml` 中 `log.level: debug`，或指定配置：
+
 ```bash
-GEOCLAW_LOG_LEVEL=debug npm run fetch:planetoid
+GEOCLAW_CONFIG=config/geoclaw.yaml npm run fetch:planetoid
 ```
 
 ### 集成测试
@@ -135,23 +168,27 @@ npm test   # 含 test/web-fetch-transport-live.test.ts，对 kh.google.com 断�
 
 ## HostPin（跳过 DNS，IP 轮询）
 
-`src/fetch/kh.google.com.yaml` 含 `kh.google.com` 全球 IPv4/IPv6。`WebFetch` **默认**每次请求轮询取一个 IP，通过 node-wreq `dns.hosts` 直连。
+`config/kh.google.com.yaml` 含 `kh.google.com` 全球 IPv4/IPv6。`WebFetch` **默认**每次请求轮询取一个 IP，通过 node-wreq `dns.hosts` 直连（由 `hostPin` 段控制）。
 
 ### IPv6 与 SOCKS5 代理
 
 上次全量测速中 **1538 个 IPv6 全部失败**，原因是：HostPin 把连接直接打到 Google 的 IPv6 地址，但本机到这些地址 **没有可用路由/出口**（`error sending request`）。IPv4 直连正常。
 
-本地 SOCKS5（如 Clash `127.0.0.1:20170`）通常具备 IPv6 出口。GeoClaw 默认：
+本地 SOCKS5（如 Clash `127.0.0.1:20170`）通常具备 IPv6 出口。在 `config/geoclaw.yaml` 配置：
 
-- 代理：`socks5://127.0.0.1:20170`（可用环境变量 `GEOCLAW_PROXY` 覆盖）
-- 策略 `proxyMode: "auto"`：**仅 IPv6 HostPin 走代理**，IPv4 仍直连
+```yaml
+proxy:
+  enabled: true
+  url: socks5://127.0.0.1:20170
+  mode: auto   # 仅 IPv6 HostPin 走代理，IPv4 直连
+```
 
 ```typescript
-import { createWebFetch, DEFAULT_GEOCLAW_PROXY } from "geoclaw";
+import { createWebFetch } from "geoclaw";
 
-const wf = createWebFetch(); // auto：IPv6 → SOCKS5，IPv4 → 直连
+const wf = createWebFetch(); // 读取 geoclaw.yaml
 
-const wfAllProxy = createWebFetch({ proxyMode: "always" }); // 全部走代理
+const wfAllProxy = createWebFetch({ proxyMode: "always" });
 const wfNoProxy = createWebFetch({ proxy: false, proxyMode: "never" });
 ```
 
@@ -164,17 +201,24 @@ npm run benchmark:kh-ips -- --proxy-mode auto
 ```
 
 ```typescript
-import { createWebFetch, khGoogleHostPinPool } from "geoclaw";
+import { createWebFetch, createHostPinPoolFromConfig, HostPinPool } from "geoclaw";
 
-// 默认已启用 khGoogleHostPinPool
+// 默认已按 geoclaw.yaml hostPin 段启用
 const wf = createWebFetch();
 
 // 关闭 HostPin，恢复系统 DNS
 const wfDns = createWebFetch({ hostPinPool: false });
 
 // 自定义池
-const pool = new HostPinPool({ hostname: "kh.google.com", family: "ipv4" });
+const pool = new HostPinPool({
+  hostname: "kh.google.com",
+  yamlPath: "config/kh.google.com.yaml",
+  family: "ipv4",
+});
 const wfV4 = createWebFetch({ hostPinPool: pool });
+
+console.log(createHostPinPoolFromConfig()?.size());
+```
 
 const { trace } = await wf.getBytesWithTrace(url, { trace: true });
 console.log(trace.pinnedIp, trace.dnsPinned); // 本次轮询到的 IP

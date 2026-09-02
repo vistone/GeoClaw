@@ -5,18 +5,21 @@
  * 用法：
  *   npm run inspect:fetch
  *   npm run inspect:fetch -- https://kh.google.com/rt/earth/PlanetoidMetadata
- *   GEOCLAW_LOG_LEVEL=debug npm run inspect:fetch
+ *   GEOCLAW_CONFIG=config/geoclaw.yaml npm run inspect:fetch
  */
 
-import { createWebFetch, DEFAULT_TLS_FINGERPRINT } from "../src/index.js";
+import { GeoClawConfig } from "../src/core/GeoClawConfig.js";
+import { createWebFetch } from "../src/index.js";
 
-const url = process.argv[2] ?? "https://kh.google.com/rt/earth/PlanetoidMetadata";
+const cfg = GeoClawConfig.get();
+const url = process.argv[2] ?? cfg.getPlanetoidMetadataUrl();
 
 const fetch = createWebFetch({ logTransportTrace: true });
 
 console.log("=== GeoClaw WebFetch 传输诊断 ===");
+console.log("配置文件:", cfg.getConfigPath());
 console.log("URL:", url);
-console.log("默认 TLS profile:", DEFAULT_TLS_FINGERPRINT);
+console.log("默认 TLS profile:", cfg.getTlsFingerprint());
 console.log("");
 
 const { bytes, trace } = await fetch.getBytesWithTrace(url, { trace: true });

@@ -10,15 +10,14 @@ import { gzipCodec } from "../codec/GzipCodec.js";
 import { pbUrlCodec } from "../codec/PbUrlCodec.js";
 import { protobufCodec } from "../codec/ProtobufCodec.js";
 import { bulkDataParser, type BulkData } from "../bulk/BulkDataParser.js";
+import { GeoClawConfig } from "../core/GeoClawConfig.js";
 import { Logger } from "../core/Logger.js";
 import {
   createWebFetch,
-  webFetch,
+  getWebFetch,
   type WebFetch,
   type WebFetchOptions,
 } from "../fetch/WebFetch.js";
-
-export const DEFAULT_ROCKTREE_BASE = "https://kh.google.com/rt/earth";
 
 export type RocktreeApiOptions = WebFetchOptions & {
   baseUrl?: string;
@@ -45,7 +44,7 @@ export class RocktreeApi {
 
   constructor(options: RocktreeApiOptions = {}) {
     const { baseUrl, webFetch: injected, ...webFetchOpts } = options;
-    this.baseUrl = baseUrl ?? DEFAULT_ROCKTREE_BASE;
+    this.baseUrl = baseUrl ?? GeoClawConfig.get().getRocktreeBaseUrl();
     this.webFetch = injected ?? createWebFetch(webFetchOpts);
   }
 
@@ -145,7 +144,25 @@ export function createRocktreeApi(options: RocktreeApiOptions = {}): RocktreeApi
   return new RocktreeApi(options);
 }
 
-export const rocktreeApi = new RocktreeApi();
+let cachedRocktreeApi: RocktreeApi | undefined;
+
+/**
+ * 默认 RocktreeApi 单例（懒加载，读取 geoclaw.yaml）。
+ * @returns 输出：`RocktreeApi` — 默认实例
+ */
+export function getRocktreeApi(): RocktreeApi {
+  cachedRocktreeApi ??= new RocktreeApi();
+  return cachedRocktreeApi;
+}
+
+/** @deprecated 请使用 getRocktreeApi() */
+export const rocktreeApi: RocktreeApi = new Proxy({} as RocktreeApi, {
+  get(_target, prop) {
+    const inst = getRocktreeApi();
+    const value = Reflect.get(inst, prop, inst);
+    return typeof value === "function" ? value.bind(inst) : value;
+  },
+});
 
 export const fetchPlanetoidMetadata = (
   options?: RocktreeApiOptions & { request?: PlanetoidMetadataRequest },

@@ -1,27 +1,31 @@
+import "./helpers/load-test-config.js";
+
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { GeoClawConfig } from "../src/core/GeoClawConfig.js";
 import {
   createWebFetch,
-  DEFAULT_GEOCLAW_PROXY,
   HostPinPool,
   resolveProxyUrl,
 } from "../src/index.js";
 
 test("resolveProxyUrl auto 仅 IPv6 走代理", () => {
+  const proxyUrl = GeoClawConfig.get().getProxyUrl();
+  assert.ok(proxyUrl);
   assert.equal(
     resolveProxyUrl({
       pinnedIp: "2404:6800::5b",
       proxyMode: "auto",
-      proxyUrl: DEFAULT_GEOCLAW_PROXY,
+      proxyUrl,
     }),
-    DEFAULT_GEOCLAW_PROXY,
+    proxyUrl,
   );
   assert.equal(
     resolveProxyUrl({
       pinnedIp: "142.250.100.91",
       proxyMode: "auto",
-      proxyUrl: DEFAULT_GEOCLAW_PROXY,
+      proxyUrl,
     }),
     undefined,
   );
@@ -45,5 +49,5 @@ test("WebFetch IPv6 HostPin live via SOCKS5", async () => {
   );
   assert.ok(bytes.length > 0);
   assert.equal(trace.pinnedIp, "2404:6800:4000:1006::5b");
-  assert.equal(trace.proxy, DEFAULT_GEOCLAW_PROXY);
+  assert.equal(trace.proxy, GeoClawConfig.get().getProxyUrl());
 });

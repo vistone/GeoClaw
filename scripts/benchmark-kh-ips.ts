@@ -6,39 +6,21 @@
  *   npm run benchmark:kh-ips
  *   npm run benchmark:kh-ips -- --concurrency 30 --family ipv4
  *   npm run benchmark:kh-ips -- --limit 50
+ *
+ * 默认值来自 config/geoclaw.yaml 的 benchmark / proxy / tls / fetch 段。
  */
 
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import { fetch } from "node-wreq";
 
+import { GeoClawConfig } from "../src/core/GeoClawConfig.js";
 import {
-  DEFAULT_GEOCLAW_PROXY,
-  DEFAULT_TLS_FINGERPRINT,
-  EARTH_WEB_CONTEXT_HEADERS,
   parseKhGoogleYaml,
   resolveProxyUrl,
   type ProxyMode,
 } from "../src/index.js";
-
-const TARGET_URL = "https://kh.google.com/rt/earth/PlanetoidMetadata";
-const HOSTNAME = "kh.google.com";
-
-const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_YAML = join(MODULE_DIR, "../src/fetch/kh.google.com.yaml");
-
-export type KhIpBenchRow = {
-  ip: string;
-  family: "ipv4" | "ipv6";
-  ok: boolean;
-  status?: number;
-  waitMs: number | null;
-  totalMs: number;
-  bodyBytes?: number;
-  error?: string;
-};
 
 type CliOptions = {
   yamlPath: string;
@@ -49,18 +31,26 @@ type CliOptions = {
   outDir: string;
   proxy?: string;
   proxyMode: ProxyMode;
+  targetUrl: string;
+  hostname: string;
 };
 
 function parseArgs(argv: string[]): CliOptions {
+  const cfg = GeoClawConfig.get();
+  const bench = cfg.getBenchmarkConfig();
+  const hostPin = cfg.getHostPinPoolOptions();
+
   const opts: CliOptions = {
-    yamlPath: DEFAULT_YAML,
-    concurrency: 20,
-    timeoutMs: 20_000,
-    family: "all",
+    yamlPath: hostPin?.yamlPath ?? GeoClawConfig.resolvePath("config/kh.google.com.yaml"),
+    concurrency: bench.concurrency,
+    timeoutMs: bench.timeoutMs,
+    family: hostPin?.family ?? "all",
     limit: null,
-    outDir: join(process.cwd(), "benchmark"),
-    proxy: DEFAULT_GEOCLAW_PROXY,
-    proxyMode: "auto",
+    outDir: join(process.cwd(), bench.outDir),
+    proxy: cfg.getProxyUrl(),
+    proxyMode: cfg.getProxyMode(),
+    targetUrl: cfg.getPlanetoidMetadataUrl(),
+    hostname: hostPin?.hostname ?? new URL(cfg.getRocktreeBaseUrl()).hostname,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -79,25 +69,39 @@ function parseArgs(argv: string[]): CliOptions {
   return opts;
 }
 
+export type KhIpBenchRow = {
+  ip: string;
+  family: "ipv4" | "ipv6";
+  ok: boolean;
+  status?: number;
+  waitMs: number | null;
+  totalMs: number;
+  bodyBytes?: number;
+  error?: string;
+};
+
 async function probeIp(
   record: { ip: string; family: "ipv4" | "ipv6" },
+  targetUrl: string,
+  hostname: string,
   timeoutMs: number,
   proxy?: string,
   proxyMode: ProxyMode = "auto",
 ): Promise<KhIpBenchRow> {
+  const cfg = GeoClawConfig.get();
   const started = Date.now();
   const proxyUrl = resolveProxyUrl({ pinnedIp: record.ip, proxyMode, proxyUrl: proxy });
   try {
-    const res = await fetch(TARGET_URL, {
+    const res = await fetch(targetUrl, {
       method: "GET",
-      browser: DEFAULT_TLS_FINGERPRINT,
+      browser: cfg.getTlsFingerprint(),
       headers: {
-        ...EARTH_WEB_CONTEXT_HEADERS,
+        ...cfg.getContextHeaders(),
         "Accept-Encoding": "identity",
       },
       dns: {
         hosts: {
-          [HOSTNAME]: [record.ip],
+          [hostname]: [record.ip],
         },
       },
       ...(proxyUrl ? { proxy: proxyUrl } : {}),
@@ -185,7 +189,8 @@ async function main() {
   writeFileSync(jsonlPath, "");
 
   console.log("=== kh.google.com PlanetoidMetadata IP 测速 ===");
-  console.log("URL:", TARGET_URL);
+  console.log("配置:", GeoClawConfig.get().getConfigPath());
+  console.log("URL:", opts.targetUrl);
   console.log("IP 数量:", records.length);
   console.log("并发:", opts.concurrency);
   console.log("超时(ms):", opts.timeoutMs);
@@ -200,7 +205,14 @@ async function main() {
   let failCount = 0;
 
   const rows = await runPool(records, opts.concurrency, async (record, index) => {
-    const row = await probeIp(record, opts.timeoutMs, opts.proxy, opts.proxyMode);
+    const row = await probeIp(
+      record,
+      opts.targetUrl,
+      opts.hostname,
+      opts.timeoutMs,
+      opts.proxy,
+      opts.proxyMode,
+    );
     appendFileSync(jsonlPath, `${JSON.stringify(row)}\n`);
     done++;
     if (row.ok) okCount++;
@@ -226,7 +238,7 @@ async function main() {
   const slowest = [...okRows].sort((a, b) => b.waitMs! - a.waitMs!).slice(0, 30);
 
   const summary = {
-    targetUrl: TARGET_URL,
+    targetUrl: opts.targetUrl,
     total: rows.length,
     ok: okCount,
     fail: failCount,

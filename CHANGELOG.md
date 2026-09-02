@@ -7,6 +7,25 @@
 
 （尚无条目。）
 
+## [0.0.9] - 2026-09-02
+
+### 新增
+
+- `config/geoclaw.yaml`：集中配置 log、rocktree、fetch、tls、proxy、hostPin、benchmark
+- `GeoClawConfig` 单例加载 YAML；`GEOCLAW_CONFIG` 可指定路径
+- `createHostPinPoolFromConfig`、`getWebFetch`、`getRocktreeApi`
+
+### 变更
+
+- **禁止代码硬编码可调参数**；`WebFetch` / `RocktreeApi` / `TlsFingerprintCodec` / `HostPinPool` 默认均读 YAML
+- `kh.google.com.yaml` 移至 `config/`；`build` 复制整个 `config/` 到 `dist/`
+- 移除 `DEFAULT_*`、`EARTH_WEB_CONTEXT_HEADERS`、`khGoogleHostPinPool` 等代码内常量
+- 日志级别改由 `log.level` 配置（替代 `GEOCLAW_LOG_LEVEL` 作为主路径）
+
+### 移除
+
+- 导出：`DEFAULT_GEOCLAW_PROXY`、`DEFAULT_TLS_FINGERPRINT`、`DEFAULT_ROCKTREE_BASE`、`EARTH_WEB_CONTEXT_HEADERS`、`khGoogleHostPinPool`
+
 ## [0.0.8] - 2026-09-02
 
 ### 新增

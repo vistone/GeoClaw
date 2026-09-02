@@ -23,6 +23,12 @@ alwaysApply: true
 - 禁止 `export default`；public API 显式类型 + 中文 JSDoc（见 `docs/JSDOC.md`）。
 - 提交前：`npm run typecheck` 与 `npm run jsdoc:check` 必须通过。
 
+## 外部 YAML 配置（强制）
+
+- **禁止在 `src/` 硬编码可调参数**（URL、代理、TLS profile、header 默认值等）。
+- 运行时读取 `config/geoclaw.yaml`（或 `GEOCLAW_CONFIG`）；通过 `GeoClawConfig.get()` 访问。
+- 构造选项仅用于测试注入或单次覆盖，不是第二套默认配置。
+
 ## 日志
 
 - 使用 `Logger`：`debug` / `info` / `warn` / `error`；每类 `private static readonly logger = new Logger("ClassName")`。

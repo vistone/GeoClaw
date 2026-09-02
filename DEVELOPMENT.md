@@ -136,6 +136,25 @@ flowchart BT
 4. **可替换性**：`WebFetch` 的 `fetch`（node-wreq）、`tlsFingerprint` 与 `headerOverrides` 可注入；`RocktreeApi` 可注入 `webFetch`；编解码类不读全局环境（Logger 除外）。
 5. **稳定接口**：public 方法签名变更视为破坏性变更，须 CHANGELOG + 版本 bump。
 
+### 1.6 外部 YAML 配置（强制）
+
+**所有可调运行时参数必须写在 `config/geoclaw.yaml`（或 `GEOCLAW_CONFIG` 指向的 YAML）中，禁止在 TypeScript 源码里硬编码默认值。**
+
+| 配置段 | 用途 |
+|--------|------|
+| `log.level` | 全局日志级别 |
+| `rocktree.baseUrl` | Rocktree API 根 URL |
+| `fetch.*` | contextHeaders、超时、trace |
+| `tls.*` | node-wreq browser profile |
+| `proxy.*` | SOCKS5/HTTP 代理 URL 与 `auto/always/never` |
+| `hostPin.*` | HostPin 域名、IP 列表 YAML、地址族 |
+| `benchmark.*` | `benchmark:kh-ips` 脚本默认值 |
+
+- 代码通过 `GeoClawConfig.get()` 读取；构造选项 **仅用于测试注入或单次覆盖**，不得作为「第二套默认配置」。
+- IP 列表等大文件放 `config/kh.google.com.yaml`，路径在 `hostPin.ipsFile` 引用。
+- 测试使用 `test/fixtures/geoclaw.test.yaml`（`npm test` 已设置 `GEOCLAW_CONFIG`）。
+- `build` 须 `cp -r config dist/config`，发布包携带配置模板。
+
 ## 2. TypeScript 标准（严格遵循）
 
 编译配置以 `tsconfig.json` 为准，**不得弱化** `strict` 或相关选项。

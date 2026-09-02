@@ -1,16 +1,15 @@
 /**
  * 统一日志对象：区分 debug / info / warn / error。
- * 环境变量 GEOCLAW_LOG_LEVEL：debug | info | warn | error | silent
+ * 级别来自 config/geoclaw.yaml 的 log.level（经 LogConfig 同步）。
  */
 
-/** 日志级别（数值越小越详细） */
-export enum LogLevel {
-  DEBUG = 0,
-  INFO = 1,
-  WARN = 2,
-  ERROR = 3,
-  SILENT = 4,
-}
+import {
+  getGlobalLogLevel,
+  LogLevel,
+  logLevelFromString,
+} from "./LogConfig.js";
+
+export { LogLevel, logLevelFromString } from "./LogConfig.js";
 
 const LEVEL_LABEL: Record<LogLevel, string> = {
   [LogLevel.DEBUG]: "DEBUG",
@@ -21,26 +20,21 @@ const LEVEL_LABEL: Record<LogLevel, string> = {
 };
 
 /**
- * 从环境变量解析日志级别。
- * @returns 输出：`DEBUG | INFO | WARN | …` — DEBUG | INFO | WARN | … 实例
+ * 读取当前全局日志级别（来自 YAML log.level）。
+ * @returns 输出：`LogLevel` — 日志级别
+ */
+
+export function logLevelFromConfig(): LogLevel {
+  return getGlobalLogLevel();
+}
+
+/**
+ * @deprecated 使用 logLevelFromConfig
+ * @returns 输出：`LogLevel` — 日志级别
  */
 
 export function logLevelFromEnv(): LogLevel {
-  const raw = (process.env.GEOCLAW_LOG_LEVEL ?? "info").toLowerCase();
-  switch (raw) {
-    case "debug":
-      return LogLevel.DEBUG;
-    case "info":
-      return LogLevel.INFO;
-    case "warn":
-      return LogLevel.WARN;
-    case "error":
-      return LogLevel.ERROR;
-    case "silent":
-      return LogLevel.SILENT;
-    default:
-      return LogLevel.INFO;
-  }
+  return logLevelFromConfig();
 }
 
 /**
@@ -60,7 +54,7 @@ export class Logger {
     private readonly scope: string,
     minLevel?: LogLevel,
   ) {
-    this.minLevel = minLevel ?? logLevelFromEnv();
+    this.minLevel = minLevel ?? logLevelFromConfig();
   }
 
   /**

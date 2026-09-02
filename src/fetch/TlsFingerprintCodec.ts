@@ -6,13 +6,8 @@ import {
   type BrowserProfile,
 } from "node-wreq";
 
+import { GeoClawConfig } from "../core/GeoClawConfig.js";
 import { Logger } from "../core/Logger.js";
-
-/** Google Earth Web 默认上下文头 */
-export const EARTH_WEB_CONTEXT_HEADERS: Readonly<Record<string, string>> = {
-  Origin: "https://earth.google.com",
-  Referer: "https://earth.google.com/",
-};
 
 /** TLS/JA3/JA4/HTTP2 浏览器指纹配置（node-wreq BrowserEmulation） */
 export type TlsFingerprintConfig = BrowserEmulation;
@@ -34,17 +29,6 @@ export type { BrowserProfile, BrowserPlatform, BrowserEmulationOptions };
 /** 内置 TLS 浏览器 profile 列表（node-wreq BROWSER_PROFILES） */
 export const BROWSER_TLS_PROFILES = BROWSER_PROFILES;
 
-/** 默认 Chrome TLS profile（Linux 桌面） */
-export const DEFAULT_TLS_BROWSER_PROFILE: BrowserProfile = "chrome_128";
-
-/** 默认 TLS 指纹：Chrome 128 + Linux + HTTP/2 + profile headers */
-export const DEFAULT_TLS_FINGERPRINT: BrowserEmulationOptions = {
-  profile: DEFAULT_TLS_BROWSER_PROFILE,
-  platform: "linux",
-  http2: true,
-  headers: true,
-};
-
 /**
  * TLS 浏览器指纹 codec：解析 node-wreq profile 并合并请求头。
  */
@@ -53,12 +37,21 @@ export class TlsFingerprintCodec {
   private readonly defaultConfig: TlsFingerprintConfig;
 
   /**
-   * @param defaultConfig - 输入：`TlsFingerprintConfig` — 默认 TLS 浏览器 profile
+   * @param defaultConfig - 输入：`TlsFingerprintConfig` — 默认 TLS profile；省略时从 geoclaw.yaml 读取
    */
 
-  constructor(defaultConfig: TlsFingerprintConfig = DEFAULT_TLS_FINGERPRINT) {
-    this.defaultConfig = defaultConfig;
-    TlsFingerprintCodec.logger.debug("初始化 TLS 指纹", { defaultConfig });
+  constructor(defaultConfig?: TlsFingerprintConfig) {
+    this.defaultConfig = defaultConfig ?? GeoClawConfig.get().getTlsFingerprint();
+    TlsFingerprintCodec.logger.debug("初始化 TLS 指纹", { defaultConfig: this.defaultConfig });
+  }
+
+  /**
+   * 返回 YAML 中的 fetch.contextHeaders。
+   * @returns 输出：`Record<string, string>` — contextHeaders
+   */
+
+  getContextHeaders(): Record<string, string> {
+    return GeoClawConfig.get().getContextHeaders();
   }
 
   /**
@@ -84,14 +77,19 @@ export class TlsFingerprintCodec {
   buildHeaders(config: TlsRequestConfig = {}): Record<string, string> {
     return TlsFingerprintCodec.logger.measureSync(
       "buildHeaders",
-      () => mergeHeaderRecords(config.context, config.overrides, config.perRequest),
+      () =>
+        mergeHeaderRecords(
+          config.context ?? GeoClawConfig.get().getContextHeaders(),
+          config.overrides,
+          config.perRequest,
+        ),
       { keys: Object.keys(config.perRequest ?? {}) },
     );
   }
 
   /**
    * 返回当前默认 TLS 指纹配置副本。
-   * @returns 输出：`TlsFingerprintConfig` — 默认 browser emulation
+   * @returns 输出：`TlsFingerprintConfig` — tls 段
    */
 
   getDefaultConfig(): TlsFingerprintConfig {
@@ -107,8 +105,6 @@ export class TlsFingerprintCodec {
     return BROWSER_TLS_PROFILES;
   }
 }
-
-export const tlsFingerprintCodec = new TlsFingerprintCodec();
 
 /**
  * 合并默认与单次 TLS profile 覆盖。

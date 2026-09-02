@@ -1,0 +1,36 @@
+log:
+  level: warn
+
+rocktree:
+  baseUrl: https://kh.google.com/rt/earth
+
+fetch:
+  contextHeaders:
+    Origin: https://earth.google.com
+    Referer: https://earth.google.com/
+  forceIdentityEncoding: true
+  logTransportTrace: false
+  timeoutMs: null
+
+tls:
+  profile: chrome_128
+  platform: linux
+  http2: true
+  profileHeaders: true
+
+proxy:
+  enabled: true
+  url: socks5://127.0.0.1:20170
+  mode: auto
+
+hostPin:
+  enabled: true
+  hostname: kh.google.com
+  ipsFile: test/fixtures/kh.test-ips.yaml
+  family: all
+
+benchmark:
+  concurrency: 5
+  timeoutMs: 15000
+  outDir: benchmark
+  planetoidPath: PlanetoidMetadata

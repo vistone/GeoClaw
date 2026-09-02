@@ -1,9 +1,8 @@
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import type { DnsOptions } from "node-wreq";
 
+import { GeoClawConfig } from "../core/GeoClawConfig.js";
 import { Logger } from "../core/Logger.js";
 
 /** YAML 中单条 IP 记录（仅解析 ip 字段） */
@@ -17,7 +16,7 @@ export type HostPinPoolOptions = {
   hostname: string;
   /** 预置 IP 列表（测试注入；优先于 yamlPath） */
   ips?: readonly string[];
-  /** YAML 文件路径；默认与 HostPinPool 同目录下 kh.google.com.yaml */
+  /** YAML 文件路径（相对项目根或绝对路径）；无 ips 时必填 */
   yamlPath?: string;
   /** 轮询地址族：all 为 ipv4+ipv6 合并列表 */
   family?: "all" | "ipv4" | "ipv6";
@@ -29,9 +28,14 @@ export type HostPinResolveResult = {
   dns: DnsOptions;
 };
 
-const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
-
-const DEFAULT_KH_GOOGLE_YAML = join(MODULE_DIR, "kh.google.com.yaml");
+/**
+ * 从 geoclaw.yaml hostPin 段创建 HostPin 池；未启用时返回 undefined。
+ * @returns 输出：`HostPinPool | undefined` — 配置启用时的池实例
+ */
+export function createHostPinPoolFromConfig(): HostPinPool | undefined {
+  const opts = GeoClawConfig.get().getHostPinPoolOptions();
+  return opts ? new HostPinPool(opts) : undefined;
+}
 
 /**
  * 从 kh.google.com.yaml 加载 IP 并按轮询分配（绕过 DNS 解析）。
@@ -48,11 +52,14 @@ export class HostPinPool {
    */
 
   constructor(options: HostPinPoolOptions) {
+    if (!options.hostname) {
+      throw new Error("HostPinPool: hostname is required");
+    }
     this.options = {
       hostname: options.hostname,
       family: options.family ?? "all",
       ips: options.ips,
-      yamlPath: options.yamlPath ?? DEFAULT_KH_GOOGLE_YAML,
+      yamlPath: options.yamlPath,
     };
   }
 
@@ -135,9 +142,18 @@ export class HostPinPool {
       return this.records;
     }
 
-    const yamlPath = this.options.yamlPath ?? DEFAULT_KH_GOOGLE_YAML;
-    HostPinPool.logger.info("加载 HostPin YAML", { yamlPath, hostname: this.options.hostname });
-    const text = readFileSync(yamlPath, "utf8");
+    const yamlPath = this.options.yamlPath;
+    if (!yamlPath) {
+      throw new Error(
+        `HostPinPool: yamlPath is required when ips are not provided (hostname=${this.options.hostname})`,
+      );
+    }
+    const resolvedPath = GeoClawConfig.resolvePath(yamlPath);
+    HostPinPool.logger.info("加载 HostPin YAML", {
+      yamlPath: resolvedPath,
+      hostname: this.options.hostname,
+    });
+    const text = readFileSync(resolvedPath, "utf8");
     const parsed = parseKhGoogleYaml(text);
     const selected =
       this.options.family === "ipv4"
@@ -156,9 +172,6 @@ export class HostPinPool {
     return this.records;
   }
 }
-
-/** kh.google.com 默认 HostPin 池（读取同目录 kh.google.com.yaml） */
-export const khGoogleHostPinPool = new HostPinPool({ hostname: "kh.google.com" });
 
 /**
  * 解析 kh.google.com.yaml 中的 ipv4 / ipv6 列表。

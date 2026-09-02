@@ -1,24 +1,27 @@
+import "./helpers/load-test-config.js";
+
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { GeoClawConfig } from "../src/core/GeoClawConfig.js";
 import {
   TlsFingerprintCodec,
   WebFetch,
-  DEFAULT_TLS_FINGERPRINT,
-  EARTH_WEB_CONTEXT_HEADERS,
   BROWSER_TLS_PROFILES,
 } from "../src/index.js";
 
 test("TlsFingerprintCodec 默认 chrome_128 linux TLS profile", () => {
+  const expected = GeoClawConfig.get().getTlsFingerprint();
   const codec = new TlsFingerprintCodec();
-  assert.deepEqual(codec.resolveBrowser({}), DEFAULT_TLS_FINGERPRINT);
+  assert.deepEqual(codec.resolveBrowser({}), expected);
   assert.ok(BROWSER_TLS_PROFILES.includes("chrome_128"));
 });
 
 test("TlsFingerprintCodec.buildHeaders 合并 Earth context", () => {
   const codec = new TlsFingerprintCodec();
+  const context = GeoClawConfig.get().getContextHeaders();
   const headers = codec.buildHeaders({
-    context: EARTH_WEB_CONTEXT_HEADERS,
+    context,
     overrides: { "Accept-Encoding": "identity" },
   });
 

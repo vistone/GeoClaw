@@ -47,7 +47,10 @@ test("HostPinPool.resolveForUrl 仅匹配配置域名", () => {
 });
 
 test("HostPinPool 加载 kh.google.com.yaml", () => {
-  const pool = new HostPinPool({ hostname: "kh.google.com" });
+  const pool = new HostPinPool({
+    hostname: "kh.google.com",
+    yamlPath: "config/kh.google.com.yaml",
+  });
   const size = pool.size();
   assert.ok(size >= 3000, `expected 3000+ IPs, got ${size}`);
 });

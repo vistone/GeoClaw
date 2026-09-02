@@ -1,0 +1,39 @@
+# GeoClaw 运行时配置（禁止在代码中硬编码可调参数）
+# 路径均相对于项目根目录，除非为绝对路径
+
+log:
+  level: info
+
+rocktree:
+  baseUrl: https://kh.google.com/rt/earth
+
+fetch:
+  contextHeaders:
+    Origin: https://earth.google.com
+    Referer: https://earth.google.com/
+  forceIdentityEncoding: true
+  logTransportTrace: false
+  timeoutMs: null
+
+tls:
+  profile: chrome_128
+  platform: linux
+  http2: true
+  profileHeaders: true
+
+proxy:
+  enabled: true
+  url: socks5://127.0.0.1:20170
+  mode: auto
+
+hostPin:
+  enabled: true
+  hostname: kh.google.com
+  ipsFile: config/kh.google.com.yaml
+  family: all
+
+benchmark:
+  concurrency: 20
+  timeoutMs: 20000
+  outDir: benchmark
+  planetoidPath: PlanetoidMetadata

@@ -1,27 +1,19 @@
 import { fetch as wreqFetch, type RequestStats, type RequestTimings } from "node-wreq";
 
+import { GeoClawConfig } from "../core/GeoClawConfig.js";
 import { Logger } from "../core/Logger.js";
+import type { ProxyMode } from "./FetchTypes.js";
+import { createHostPinPoolFromConfig, HostPinPool } from "./HostPinPool.js";
 import {
-  HostPinPool,
-  khGoogleHostPinPool,
-} from "./HostPinPool.js";
-import {
-  EARTH_WEB_CONTEXT_HEADERS,
   TlsFingerprintCodec,
-  tlsFingerprintCodec,
   type TlsFingerprintConfig,
   type TlsRequestConfig,
 } from "./TlsFingerprintCodec.js";
 
+export type { ProxyMode } from "./FetchTypes.js";
+
 /** node-wreq fetch（TLS/JA3/HTTP2 浏览器指纹） */
 export type TlsFetchFn = typeof wreqFetch;
-
-/** SOCKS5/HTTP 代理使用策略 */
-export type ProxyMode = "auto" | "always" | "never";
-
-/** 默认 SOCKS5 代理（可通过 GEOCLAW_PROXY 覆盖） */
-export const DEFAULT_GEOCLAW_PROXY =
-  process.env.GEOCLAW_PROXY ?? "socks5://127.0.0.1:20170";
 
 /** 单次 GET 的传输层追踪信息 */
 export type FetchTransportTrace = {
@@ -88,28 +80,25 @@ export type WebFetchGetOptions = {
 export type WebFetchOptions = {
   /** 自定义 fetch；默认 node-wreq（TLS 指纹） */
   fetch?: TlsFetchFn;
-  /** 默认 TLS 浏览器 profile（JA3/JA4/HTTP2） */
+  /** 默认 TLS 浏览器 profile（JA3/JA4/HTTP2）；省略时读 geoclaw.yaml tls 段 */
   tlsFingerprint?: TlsFingerprintConfig;
-  /** 每个请求附加的上下文头（默认 Google Earth） */
+  /** 每个请求附加的上下文头；省略时读 geoclaw.yaml fetch.contextHeaders */
   contextHeaders?: Record<string, string>;
   /** 持久覆盖（高于 context，低于单次 headers） */
   headerOverrides?: Record<string, string>;
-  /** protobuf 响应时使用 identity 编码；默认 true */
+  /** protobuf 响应时使用 identity 编码；省略时读 geoclaw.yaml */
   forceIdentityEncoding?: boolean;
   /** 注入 TLS 指纹 codec（测试用） */
   tlsFingerprintCodec?: TlsFingerprintCodec;
-  /** 请求超时（毫秒） */
+  /** 请求超时（毫秒）；省略时读 geoclaw.yaml fetch.timeoutMs */
   timeout?: number;
-  /** 默认开启传输 trace 日志（DEBUG 级别） */
+  /** 默认开启传输 trace 日志（DEBUG 级别）；省略时读 geoclaw.yaml */
   logTransportTrace?: boolean;
-  /** HostPin 池；false 关闭；默认 kh.google.com YAML 轮询 */
+  /** HostPin 池；false 关闭；省略时按 geoclaw.yaml hostPin 段 */
   hostPinPool?: HostPinPool | false;
-  /** 代理 URL；false 禁用；默认 DEFAULT_GEOCLAW_PROXY */
+  /** 代理 URL；false 禁用；省略时读 geoclaw.yaml proxy 段 */
   proxy?: string | false;
-  /**
-   * 代理策略：auto=仅 IPv6 HostPin 走代理，always=全部走代理，never=不走代理
-   * @default "auto"
-   */
+  /** 代理策略；省略时读 geoclaw.yaml proxy.mode */
   proxyMode?: ProxyMode;
 };
 
@@ -129,26 +118,29 @@ export class WebFetch {
     };
 
   /**
-   * @param options - 输入：`WebFetchOptions` — TLS 指纹、context、header 覆盖
+   * @param options - 输入：`WebFetchOptions` — TLS 指纹、context、header 覆盖；未指定字段从 geoclaw.yaml 读取
    */
 
   constructor(options: WebFetchOptions = {}) {
+    const cfg = GeoClawConfig.get();
     this.options = {
       fetch: options.fetch,
-      tlsFingerprint: options.tlsFingerprint,
-      contextHeaders: options.contextHeaders ?? { ...EARTH_WEB_CONTEXT_HEADERS },
+      tlsFingerprint: options.tlsFingerprint ?? cfg.getTlsFingerprint(),
+      contextHeaders: options.contextHeaders ?? cfg.getContextHeaders(),
       headerOverrides: options.headerOverrides ?? {},
-      forceIdentityEncoding: options.forceIdentityEncoding ?? true,
-      tlsFingerprintCodec: options.tlsFingerprintCodec ?? tlsFingerprintCodec,
-      timeout: options.timeout,
-      logTransportTrace: options.logTransportTrace ?? false,
+      forceIdentityEncoding: options.forceIdentityEncoding ?? cfg.getForceIdentityEncoding(),
+      tlsFingerprintCodec: options.tlsFingerprintCodec ?? new TlsFingerprintCodec(),
+      timeout: options.timeout ?? cfg.getFetchTimeoutMs(),
+      logTransportTrace: options.logTransportTrace ?? cfg.getLogTransportTrace(),
       hostPinPool:
-        options.hostPinPool === false ? undefined : (options.hostPinPool ?? khGoogleHostPinPool),
-      proxyMode: options.proxyMode ?? "auto",
+        options.hostPinPool === false
+          ? undefined
+          : (options.hostPinPool ?? createHostPinPoolFromConfig()),
+      proxyMode: options.proxyMode ?? cfg.getProxyMode(),
       proxyUrl:
         options.proxy === false
           ? undefined
-          : (typeof options.proxy === "string" ? options.proxy : DEFAULT_GEOCLAW_PROXY),
+          : (typeof options.proxy === "string" ? options.proxy : cfg.getProxyUrl()),
     };
   }
 
@@ -309,7 +301,25 @@ export class WebFetch {
   }
 }
 
-export const webFetch = new WebFetch();
+let cachedWebFetch: WebFetch | undefined;
+
+/**
+ * 默认 WebFetch 单例（懒加载，读取 geoclaw.yaml）。
+ * @returns 输出：`WebFetch` — 默认实例
+ */
+export function getWebFetch(): WebFetch {
+  cachedWebFetch ??= new WebFetch();
+  return cachedWebFetch;
+}
+
+/** @deprecated 请使用 getWebFetch()；保留 Proxy 以兼容旧代码 */
+export const webFetch: WebFetch = new Proxy({} as WebFetch, {
+  get(_target, prop) {
+    const inst = getWebFetch();
+    const value = Reflect.get(inst, prop, inst);
+    return typeof value === "function" ? value.bind(inst) : value;
+  },
+});
 
 /**
  * 创建 WebFetch 实例。
@@ -447,6 +457,3 @@ function headersToRecord(headers: { entries(): IterableIterator<[string, string]
   }
   return out;
 }
-
-/** Google Earth Web 默认上下文头 */
-export { EARTH_WEB_CONTEXT_HEADERS };
