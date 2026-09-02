@@ -208,3 +208,20 @@ export function parseKhGoogleYaml(yamlText: string): {
 
   return { ipv4, ipv6, all: [...ipv4, ...ipv6] };
 }
+
+/**
+ * 从 YAML 文件加载 IP 列表。
+ * @param yamlPath - 输入：`string` — ipsFile 绝对路径
+ * @param family - 输入：`"all" | "ipv4" | "ipv6"` — 地址族
+ * @returns 输出：`HostPinRecord[]` — IP 记录
+ */
+export function loadHostPinRecordsFromYaml(
+  yamlPath: string,
+  family: "all" | "ipv4" | "ipv6",
+): HostPinRecord[] {
+  const text = readFileSync(yamlPath, "utf8");
+  const parsed = parseKhGoogleYaml(text);
+  if (family === "ipv4") return parsed.ipv4;
+  if (family === "ipv6") return parsed.ipv6;
+  return parsed.all;
+}

@@ -7,6 +7,8 @@ import type { BrowserEmulationOptions, BrowserPlatform, BrowserProfile } from "n
 
 import { setGlobalLogLevel, LogLevel, logLevelFromString } from "./LogConfig.js";
 import type { HostPinPoolOptions } from "../fetch/HostPinPool.js";
+import { loadHostPinRecordsFromYaml } from "../fetch/HostPinPool.js";
+import type { HotConnectionPoolOptions } from "../fetch/HotConnectionPool.js";
 import type { ProxyMode } from "../fetch/FetchTypes.js";
 
 /** config/geoclaw.yaml 文件结构 */
@@ -41,6 +43,21 @@ export type GeoClawConfigFile = {
     timeoutMs: number;
     outDir: string;
     planetoidPath: string;
+  };
+  warmPool: {
+    enabled: boolean;
+    ipsFile: string | null;
+    warmupPath: string | null;
+    poolIdleTimeout: number | false | null;
+    poolMaxIdlePerHost: number;
+    deniedStatuses: number[];
+    successStatus: number;
+    initialConcurrency: number;
+    reheatConcurrency: number;
+    reheatIntervalMs: number;
+    reheatBackoffMs: number;
+    deniedBackoffMs: number;
+    fallbackToHostPin: boolean;
   };
 };
 
@@ -235,6 +252,60 @@ export class GeoClawConfig {
 
   getBenchmarkConfig(): GeoClawConfigFile["benchmark"] {
     return { ...this.file.benchmark };
+  }
+
+  /**
+   * 热连接池选项；未启用时 null。
+   * @returns 输出：`HotConnectionPoolOptions | null` — warmPool 段
+   */
+
+  getWarmPoolOptions(): HotConnectionPoolOptions | null {
+    const warm = this.file.warmPool;
+    if (!warm?.enabled) {
+      return null;
+    }
+
+    const hostPin = this.file.hostPin;
+    const ipsFile = warm.ipsFile ?? hostPin.ipsFile;
+    const yamlPath = GeoClawConfig.resolvePath(ipsFile);
+    const ips = loadHostPinRecordsFromYaml(yamlPath, hostPin.family);
+
+    const warmupPath = warm.warmupPath ?? this.file.benchmark.planetoidPath;
+    const warmupUrl = joinUrl(this.file.rocktree.baseUrl, warmupPath);
+
+    const headers: Record<string, string> = {
+      ...this.file.fetch.contextHeaders,
+      ...(this.file.fetch.forceIdentityEncoding ? { "Accept-Encoding": "identity" } : {}),
+    };
+
+    return {
+      hostname: hostPin.hostname,
+      ips,
+      warmupUrl,
+      headers,
+      browser: this.getTlsFingerprint(),
+      proxyUrl: this.getProxyUrl(),
+      proxyMode: this.getProxyMode(),
+      timeoutMs: this.getFetchTimeoutMs() ?? this.file.benchmark.timeoutMs,
+      poolIdleTimeout: warm.poolIdleTimeout === null ? false : warm.poolIdleTimeout,
+      poolMaxIdlePerHost: warm.poolMaxIdlePerHost,
+      deniedStatuses: warm.deniedStatuses,
+      successStatus: warm.successStatus,
+      initialConcurrency: warm.initialConcurrency,
+      reheatConcurrency: warm.reheatConcurrency,
+      reheatIntervalMs: warm.reheatIntervalMs,
+      reheatBackoffMs: warm.reheatBackoffMs,
+      deniedBackoffMs: warm.deniedBackoffMs,
+    };
+  }
+
+  /**
+   * warmPool 是否允许无热连接时回退 HostPin 冷请求。
+   * @returns 输出：`boolean` — fallbackToHostPin
+   */
+
+  getWarmPoolFallbackToHostPin(): boolean {
+    return this.file.warmPool?.fallbackToHostPin ?? false;
   }
 
   /**

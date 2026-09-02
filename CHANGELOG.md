@@ -7,6 +7,20 @@
 
 （尚无条目。）
 
+## [0.0.10] - 2026-09-02
+
+### 新增
+
+- `HotConnectionPool`：每 IP 一个 `node-wreq createClient`，HTTP 200 入热池，403/429 拒绝并后台重加热
+- `npm run warm:kh-ips`：首轮预热 + 可选 `--daemon` 后台重试
+- `config/geoclaw.yaml` 的 `warmPool` 段（并发、退避、拒绝状态码等）
+- `WebFetch` 优先经热池发请求（复用 HTTP/2 连接）
+
+### 变更
+
+- `resolveProxyUrl` 移至 `fetch/FetchTypes.ts`
+- `warmPool.fallbackToHostPin: false` 时无热连接则拒绝冷 HostPin 回退
+
 ## [0.0.9] - 2026-09-02
 
 ### 新增

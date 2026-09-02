@@ -37,3 +37,18 @@ benchmark:
   timeoutMs: 20000
   outDir: benchmark
   planetoidPath: PlanetoidMetadata
+
+warmPool:
+  enabled: true
+  ipsFile: null
+  warmupPath: null
+  poolIdleTimeout: false
+  poolMaxIdlePerHost: 1
+  deniedStatuses: [403, 429]
+  successStatus: 200
+  initialConcurrency: 20
+  reheatConcurrency: 5
+  reheatIntervalMs: 10000
+  reheatBackoffMs: 30000
+  deniedBackoffMs: 60000
+  fallbackToHostPin: false

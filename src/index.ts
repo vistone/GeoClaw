@@ -53,12 +53,27 @@ export type { LatLon } from "./bulk/LatLonBox.js";
 export { LatLonBoxCodec, latLonBoxCodec } from "./bulk/LatLonBoxCodec.js";
 export { TextureMetadataParser, textureMetadataParser } from "./bulk/TextureMetadataParser.js";
 
+export type { ProxyMode } from "./fetch/FetchTypes.js";
+export { resolveProxyUrl } from "./fetch/FetchTypes.js";
+
+export {
+  HotConnectionPool,
+  createHotConnectionPoolFromConfig,
+  classifyWarmHttpStatus,
+} from "./fetch/HotConnectionPool.js";
+export type {
+  HotConnectionPoolOptions,
+  HotSlotState,
+  WarmAttemptOutcome,
+  WarmupSummary,
+  HotPoolStats,
+} from "./fetch/HotConnectionPool.js";
+
 export {
   WebFetch,
   webFetch,
   getWebFetch,
   createWebFetch,
-  resolveProxyUrl,
 } from "./fetch/WebFetch.js";
 export type {
   WebFetchOptions,
@@ -67,7 +82,6 @@ export type {
   FetchTransportTrace,
   WebFetchResult,
 } from "./fetch/WebFetch.js";
-export type { ProxyMode } from "./fetch/FetchTypes.js";
 
 export {
   TlsFingerprintCodec,
@@ -85,6 +99,7 @@ export {
   HostPinPool,
   createHostPinPoolFromConfig,
   parseKhGoogleYaml,
+  loadHostPinRecordsFromYaml,
 } from "./fetch/HostPinPool.js";
 export type {
   HostPinPoolOptions,

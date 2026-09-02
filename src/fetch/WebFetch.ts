@@ -3,7 +3,12 @@ import { fetch as wreqFetch, type RequestStats, type RequestTimings } from "node
 import { GeoClawConfig } from "../core/GeoClawConfig.js";
 import { Logger } from "../core/Logger.js";
 import type { ProxyMode } from "./FetchTypes.js";
+import { resolveProxyUrl } from "./FetchTypes.js";
 import { createHostPinPoolFromConfig, HostPinPool } from "./HostPinPool.js";
+import {
+  createHotConnectionPoolFromConfig,
+  HotConnectionPool,
+} from "./HotConnectionPool.js";
 import {
   TlsFingerprintCodec,
   type TlsFingerprintConfig,
@@ -11,6 +16,7 @@ import {
 } from "./TlsFingerprintCodec.js";
 
 export type { ProxyMode } from "./FetchTypes.js";
+export { resolveProxyUrl } from "./FetchTypes.js";
 
 /** node-wreq fetch（TLS/JA3/HTTP2 浏览器指纹） */
 export type TlsFetchFn = typeof wreqFetch;
@@ -100,6 +106,8 @@ export type WebFetchOptions = {
   proxy?: string | false;
   /** 代理策略；省略时读 geoclaw.yaml proxy.mode */
   proxyMode?: ProxyMode;
+  /** 热连接池；false 关闭；省略时按 geoclaw.yaml warmPool 段 */
+  hotConnectionPool?: HotConnectionPool | false;
 };
 
 /**
@@ -113,6 +121,8 @@ export class WebFetch {
     Pick<WebFetchOptions, "fetch" | "tlsFingerprint" | "timeout"> & {
       tlsFingerprintCodec: TlsFingerprintCodec;
       hostPinPool?: HostPinPool;
+      hotConnectionPool?: HotConnectionPool;
+      warmPoolFallbackToHostPin: boolean;
       proxyMode: ProxyMode;
       proxyUrl?: string;
     };
@@ -136,6 +146,11 @@ export class WebFetch {
         options.hostPinPool === false
           ? undefined
           : (options.hostPinPool ?? createHostPinPoolFromConfig()),
+      hotConnectionPool:
+        options.hotConnectionPool === false
+          ? undefined
+          : (options.hotConnectionPool ?? createHotConnectionPoolFromConfig()),
+      warmPoolFallbackToHostPin: cfg.getWarmPoolFallbackToHostPin(),
       proxyMode: options.proxyMode ?? cfg.getProxyMode(),
       proxyUrl:
         options.proxy === false
@@ -172,11 +187,27 @@ export class WebFetch {
     return WebFetch.logger.measureAsync(
       "getBytesWithTrace",
       async () => {
+        const urlHostname = new URL(url).hostname;
+        const extraHeaders = this.buildHeaders(getOptions);
+        const browser = this.resolveBrowser(getOptions);
+        const collectTls = getOptions.trace ?? this.options.logTransportTrace;
+        const hotPool = this.options.hotConnectionPool;
+        const pinHostname = GeoClawConfig.get().getRaw().hostPin.hostname;
+        const isPinnedHost = urlHostname === pinHostname;
+
+        if (hotPool && isPinnedHost) {
+          if (hotPool.getHotCount() > 0) {
+            return this.getBytesViaHotPool(url, getOptions, extraHeaders, browser, collectTls);
+          }
+          if (!this.options.warmPoolFallbackToHostPin) {
+            throw new Error(
+              "HotConnectionPool: no hot connections — run warm:kh-ips or wait for background reheat",
+            );
+          }
+        }
+
         const fetchFn = this.options.fetch ?? wreqFetch;
         const transport = fetchFn === wreqFetch ? "node-wreq" : "custom";
-        const browser = this.resolveBrowser(getOptions);
-        const extraHeaders = this.buildHeaders(getOptions);
-        const collectTls = getOptions.trace ?? this.options.logTransportTrace;
         const hostPin = this.options.hostPinPool?.resolveForUrl(url);
         const proxy = this.resolveProxy(hostPin?.pinnedIp, getOptions);
 
@@ -242,6 +273,81 @@ export class WebFetch {
       },
       { url },
     );
+  }
+
+  /**
+   * 返回热连接池实例（用于预热与后台重加热）。
+   * @returns 输出：`HotConnectionPool | undefined` — 已配置时返回
+   */
+
+  getHotConnectionPool(): HotConnectionPool | undefined {
+    return this.options.hotConnectionPool;
+  }
+
+  /**
+   * 经热连接池 GET（复用 per-IP HTTP/2 连接）。
+   * @param url - 输入：`string` — 完整 URL
+   * @param getOptions - 输入：`WebFetchGetOptions` — 单次覆盖
+   * @param extraHeaders - 输入：`Record<string, string>` — 已合并请求头
+   * @param browser - 输入：`TlsFingerprintConfig` — TLS profile
+   * @param collectTls - 输入：`boolean` — 是否收集 TLS 调试信息
+   * @returns 输出：`Promise<WebFetchResult>` — 字节与 trace
+   */
+
+  private async getBytesViaHotPool(
+    url: string,
+    getOptions: WebFetchGetOptions,
+    extraHeaders: Record<string, string>,
+    browser: TlsFingerprintConfig,
+    collectTls: boolean,
+  ): Promise<WebFetchResult> {
+    const pool = this.options.hotConnectionPool!;
+    const perRequestHeaders = getOptions.headers ?? {};
+    const merged =
+      Object.keys(perRequestHeaders).length > 0
+        ? { ...extraHeaders, ...perRequestHeaders }
+        : extraHeaders;
+
+    const { response, ip, timings } = await pool.fetchGet(url, merged);
+    const proxy = this.resolveProxy(ip, getOptions);
+
+    if (!response.ok) {
+      WebFetch.logger.error("热连接 HTTP 失败", { status: response.status, url, ip });
+      throw new Error(`HTTP ${response.status} ${response.statusText}: ${url}`);
+    }
+
+    const buf = new Uint8Array(await response.arrayBuffer());
+    const trace = buildTransportTrace({
+      url,
+      transport: "node-wreq",
+      browser,
+      extraHeaders: merged,
+      status: response.status,
+      statusText: response.statusText,
+      responseHeaders: headersToRecord(response.headers),
+      bodyBytes: buf.length,
+      timings: timings ?? response.wreq.timings,
+      tlsPeer: collectTls ? response.wreq.tls : undefined,
+      requestHostname: GeoClawConfig.get().getRaw().hostPin.hostname,
+      pinnedIp: ip,
+      dnsPinned: true,
+      proxy,
+      proxyMode: getOptions.proxyMode ?? this.options.proxyMode,
+    });
+
+    if (this.options.logTransportTrace || getOptions.trace) {
+      WebFetch.logger.info("热连接 trace", trace);
+    } else {
+      WebFetch.logger.debug("热连接响应", {
+        url,
+        ip,
+        bytes: buf.length,
+        status: response.status,
+        likelyHttp2: trace.likelyHttp2Response,
+      });
+    }
+
+    return { bytes: buf, trace };
   }
 
   /**
@@ -401,28 +507,6 @@ function buildTransportTrace(args: {
     proxy: args.proxy,
     proxyMode: args.proxyMode,
   };
-}
-
-/**
- * 按策略决定是否使用代理 URL。
- * @param input - 输入：`object` — pinnedIp、proxyMode、proxyUrl
- * @returns 输出：`string | undefined` — 代理 URL
- */
-export function resolveProxyUrl(input: {
-  pinnedIp?: string;
-  proxyMode: ProxyMode;
-  proxyUrl?: string;
-}): string | undefined {
-  if (input.proxyMode === "never" || !input.proxyUrl) {
-    return undefined;
-  }
-  if (input.proxyMode === "always") {
-    return input.proxyUrl;
-  }
-  if (input.pinnedIp?.includes(":")) {
-    return input.proxyUrl;
-  }
-  return undefined;
 }
 
 /**
