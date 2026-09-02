@@ -25,7 +25,7 @@ src/
   core/          # L1 基础层：Logger、BytesLike（零业务、零 Rocktree）
   codec/         # L2 编解码层：字节 / URL / 路径 / flags / Protobuf
   bulk/          # L3 领域层：Bulk 元数据解析（纯内存，无 HTTP）
-  fetch/         # L4 抓取层：WebFetch + 浏览器指纹（header-generator，可配置 header）
+  fetch/         # L4 抓取层：WebFetch + TLS 浏览器指纹（node-wreq JA3/JA4/HTTP2）
   client/        # L5 接入层：Rocktree API（编排 fetch + codec + bulk）
   index.ts       # L6 门面：仅 re-export 与兼容函数，不含业务逻辑
 ```
@@ -105,8 +105,8 @@ flowchart BT
 
 | 文件 | 职责 | 输入 → 输出 | 不做 |
 |------|------|-------------|------|
-| `BrowserFingerprintCodec.ts` | 基于 header-generator 生成浏览器指纹请求头 | 指纹 / context / overrides 配置 → Headers | Protobuf 解码、Rocktree URL |
-| `WebFetch.ts` | 带指纹的 GET 字节拉取 | URL + header 覆盖 → Uint8Array | Rocktree 业务、Bulk 解析 |
+| `TlsFingerprintCodec.ts` | 解析 node-wreq TLS 浏览器 profile 并合并附加请求头 | profile / context / overrides → browser + Headers | 原生 TLS 握手（由 node-wreq 负责） |
+| `WebFetch.ts` | 带 TLS 指纹的 GET 字节拉取（默认 node-wreq） | URL + header 覆盖 → Uint8Array | Rocktree 业务、Bulk 解析 |
 
 **独立运行**：`webFetch.getBytes(url)` 即可；指纹与 header 通过构造选项或单次 `getOptions.headers` 配置。
 
@@ -132,7 +132,7 @@ flowchart BT
 1. **新增功能先定模块**：先写清「属于哪一层、哪个类」，再写代码；禁止为省事把逻辑堆进 `client/` 或 `index.ts`。
 2. **跨模块只走 public API**：通过类实例 / 单例调用，禁止复制粘贴其他模块内部实现。
 3. **每模块必有测试**：`test/<模块名>.test.ts` 或按领域拆分；纯函数 / 纯内存模块不得仅有 live 测试。
-4. **可替换性**：`WebFetch` 的 `fetch`、指纹与 `headerOverrides` 可注入；`RocktreeApi` 可注入 `webFetch`；编解码类不读全局环境（Logger 除外）。
+4. **可替换性**：`WebFetch` 的 `fetch`（node-wreq）、`tlsFingerprint` 与 `headerOverrides` 可注入；`RocktreeApi` 可注入 `webFetch`；编解码类不读全局环境（Logger 除外）。
 5. **稳定接口**：public 方法签名变更视为破坏性变更，须 CHANGELOG + 版本 bump。
 
 ## 2. TypeScript 标准（严格遵循）

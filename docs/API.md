@@ -1069,74 +1069,121 @@ unpackTextureFormat(availableTextureFormats: undefined | number, defaultAvailabl
 
 ## L4 HTTP 抓取 fetch
 
-### BrowserFingerprintCodec
+### TlsFingerprintCodec
 
-源文件：[`src/fetch/BrowserFingerprintCodec.ts`](../src/fetch/BrowserFingerprintCodec.ts)
+源文件：[`src/fetch/TlsFingerprintCodec.ts`](../src/fetch/TlsFingerprintCodec.ts)
 
-基于 header-generator 的浏览器指纹请求头对象。
+TLS 浏览器指纹 codec：解析 node-wreq profile 并合并请求头。
 
-#### BrowserFingerprintCodec 构造函数
+#### TlsFingerprintCodec 构造函数
 
 ```typescript
-constructor(defaultConfig: Partial<HeaderGeneratorOptions>)
+constructor(defaultConfig: "chrome_100" | "chrome_101" | "chrome_104" | …)
 ```
 
 | 参数 | 说明 |
 |------|------|
-| `defaultConfig` | 输入：`BrowserFingerprintConfig` — 构造时默认指纹参数 |
+| `defaultConfig` | 输入：`TlsFingerprintConfig` — 默认 TLS 浏览器 profile |
 
 <details><summary>原始 JSDoc</summary>
 
 ```typescript
 /**
-   * @param defaultConfig - 输入：`BrowserFingerprintConfig` — 构造时默认指纹参数
+   * @param defaultConfig - 输入：`TlsFingerprintConfig` — 默认 TLS 浏览器 profile
    */
 ```
 
 </details>
 
-#### BrowserFingerprintCodec.build
+#### TlsFingerprintCodec.buildHeaders
 
 ```typescript
-build(config: RequestHeaderConfig): Record<string, string>
+buildHeaders(config: TlsRequestConfig): Record<string, string>
 ```
 
-生成并合并 HTTP 请求头。
+合并 context / overrides / perRequest 请求头（TLS profile 默认头由 node-wreq 注入）。
 
 | 参数 | 说明 |
 |------|------|
-| `config` | 输入：`RequestHeaderConfig` — 指纹、context、overrides、perRequest |
+| `config` | 输入：`TlsRequestConfig` — context、overrides、perRequest |
 
-**返回：** 输出：`Record<string, string>` — 合并后的请求头
+**返回：** 输出：`Record<string, string>` — 附加请求头
 
 <details><summary>原始 JSDoc</summary>
 
 ```typescript
 /**
-   * 生成并合并 HTTP 请求头。
-   * @param config - 输入：`RequestHeaderConfig` — 指纹、context、overrides、perRequest
-   * @returns 输出：`Record<string, string>` — 合并后的请求头
+   * 合并 context / overrides / perRequest 请求头（TLS profile 默认头由 node-wreq 注入）。
+   * @param config - 输入：`TlsRequestConfig` — context、overrides、perRequest
+   * @returns 输出：`Record<string, string>` — 附加请求头
    */
 ```
 
 </details>
 
-#### BrowserFingerprintCodec.getDefaultConfig
+#### TlsFingerprintCodec.getDefaultConfig
 
 ```typescript
-getDefaultConfig(): Partial<HeaderGeneratorOptions>
+getDefaultConfig(): "chrome_100" | "chrome_101" | "chrome_104" | …
 ```
 
-返回新的 HeaderGenerator 选项快照（只读复制）。
+返回当前默认 TLS 指纹配置副本。
 
-**返回：** 输出：`BrowserFingerprintConfig` — 当前 generator 全局选项
+**返回：** 输出：`TlsFingerprintConfig` — 默认 browser emulation
 
 <details><summary>原始 JSDoc</summary>
 
 ```typescript
 /**
-   * 返回新的 HeaderGenerator 选项快照（只读复制）。
-   * @returns 输出：`BrowserFingerprintConfig` — 当前 generator 全局选项
+   * 返回当前默认 TLS 指纹配置副本。
+   * @returns 输出：`TlsFingerprintConfig` — 默认 browser emulation
+   */
+```
+
+</details>
+
+#### TlsFingerprintCodec.listProfiles
+
+```typescript
+listProfiles(): "chrome_100" | "chrome_101" | "chrome_104" | …[]
+```
+
+列出 node-wreq 内置 TLS 浏览器 profile。
+
+**返回：** 输出：`readonly BrowserProfile[]` — profile 名称列表
+
+<details><summary>原始 JSDoc</summary>
+
+```typescript
+/**
+   * 列出 node-wreq 内置 TLS 浏览器 profile。
+   * @returns 输出：`readonly BrowserProfile[]` — profile 名称列表
+   */
+```
+
+</details>
+
+#### TlsFingerprintCodec.resolveBrowser
+
+```typescript
+resolveBrowser(config: TlsRequestConfig): "chrome_100" | "chrome_101" | "chrome_104" | …
+```
+
+解析本次请求使用的 TLS 浏览器 profile。
+
+| 参数 | 说明 |
+|------|------|
+| `config` | 输入：`TlsRequestConfig` — 可选 tlsFingerprint 覆盖 |
+
+**返回：** 输出：`BrowserEmulation` — 传给 node-wreq 的 browser 选项
+
+<details><summary>原始 JSDoc</summary>
+
+```typescript
+/**
+   * 解析本次请求使用的 TLS 浏览器 profile。
+   * @param config - 输入：`TlsRequestConfig` — 可选 tlsFingerprint 覆盖
+   * @returns 输出：`BrowserEmulation` — 传给 node-wreq 的 browser 选项
    */
 ```
 
@@ -1146,7 +1193,7 @@ getDefaultConfig(): Partial<HeaderGeneratorOptions>
 
 源文件：[`src/fetch/WebFetch.ts`](../src/fetch/WebFetch.ts)
 
-带浏览器指纹的 HTTP GET 抓取对象（非 Rocktree 专用）。
+带 TLS 浏览器指纹的 HTTP GET 抓取对象（非 Rocktree 专用）。
 
 #### WebFetch 构造函数
 
@@ -1156,13 +1203,13 @@ constructor(options: WebFetchOptions)
 
 | 参数 | 说明 |
 |------|------|
-| `options` | 输入：`WebFetchOptions` — fetch、指纹、context、header 覆盖 |
+| `options` | 输入：`WebFetchOptions` — TLS 指纹、context、header 覆盖 |
 
 <details><summary>原始 JSDoc</summary>
 
 ```typescript
 /**
-   * @param options - 输入：`WebFetchOptions` — fetch、指纹、context、header 覆盖
+   * @param options - 输入：`WebFetchOptions` — TLS 指纹、context、header 覆盖
    */
 ```
 
@@ -1174,7 +1221,7 @@ constructor(options: WebFetchOptions)
 buildHeaders(getOptions: WebFetchGetOptions): Record<string, string>
 ```
 
-构建本次 GET 请求头（指纹 + context + 覆盖）。
+构建本次 GET 附加请求头（context + 覆盖；profile 默认头由 node-wreq 注入）。
 
 | 参数 | 说明 |
 |------|------|
@@ -1186,7 +1233,7 @@ buildHeaders(getOptions: WebFetchGetOptions): Record<string, string>
 
 ```typescript
 /**
-   * 构建本次 GET 请求头（指纹 + context + 覆盖）。
+   * 构建本次 GET 附加请求头（context + 覆盖；profile 默认头由 node-wreq 注入）。
    * @param getOptions - 输入：`WebFetchGetOptions` — 单次覆盖
    * @returns 输出：`Record<string, string>` — 请求头
    */
@@ -1200,12 +1247,12 @@ buildHeaders(getOptions: WebFetchGetOptions): Record<string, string>
 getBytes(url: string, getOptions: WebFetchGetOptions): Promise<Uint8Array>
 ```
 
-GET 请求并返回响应字节。
+GET 请求并返回响应字节（TLS 浏览器指纹由 node-wreq 原生层实现）。
 
 | 参数 | 说明 |
 |------|------|
 | `url` | 输入：`string` — 完整 URL |
-| `getOptions` | 输入：`WebFetchGetOptions` — 单次 headers / fingerprint 覆盖 |
+| `getOptions` | 输入：`WebFetchGetOptions` — 单次 headers / tlsFingerprint 覆盖 |
 
 **返回：** 输出：`Promise<Uint8Array>` — 响应体
 
@@ -1215,11 +1262,37 @@ GET 请求并返回响应字节。
 
 ```typescript
 /**
-   * GET 请求并返回响应字节。
+   * GET 请求并返回响应字节（TLS 浏览器指纹由 node-wreq 原生层实现）。
    * @param url - 输入：`string` — 完整 URL
-   * @param getOptions - 输入：`WebFetchGetOptions` — 单次 headers / fingerprint 覆盖
+   * @param getOptions - 输入：`WebFetchGetOptions` — 单次 headers / tlsFingerprint 覆盖
    * @returns 输出：`Promise<Uint8Array>` — 响应体
    * @throws {Error} fetch 不可用或 HTTP 非 2xx
+   */
+```
+
+</details>
+
+#### WebFetch.resolveBrowser
+
+```typescript
+resolveBrowser(getOptions: WebFetchGetOptions): "chrome_100" | "chrome_101" | "chrome_104" | …
+```
+
+解析本次 GET 使用的 TLS 浏览器 profile。
+
+| 参数 | 说明 |
+|------|------|
+| `getOptions` | 输入：`WebFetchGetOptions` — 单次覆盖 |
+
+**返回：** 输出：`TlsFingerprintConfig` — node-wreq browser 选项
+
+<details><summary>原始 JSDoc</summary>
+
+```typescript
+/**
+   * 解析本次 GET 使用的 TLS 浏览器 profile。
+   * @param getOptions - 输入：`WebFetchGetOptions` — 单次覆盖
+   * @returns 输出：`TlsFingerprintConfig` — node-wreq browser 选项
    */
 ```
 
@@ -1369,7 +1442,7 @@ createRocktreeApi(options: WebFetchOptions & object): RocktreeApi
 
 | 参数 | 说明 |
 |------|------|
-| `options` | 输入：`WebFetchOptions & object` — 配置选项 |
+| `options` | 输入：`RocktreeApiOptions` — baseUrl、WebFetch 与 header 配置 |
 
 **返回：** 输出：`RocktreeApi` — Rocktree API 实例
 
@@ -1378,7 +1451,7 @@ createRocktreeApi(options: WebFetchOptions & object): RocktreeApi
 ```typescript
 /**
  * 创建 RocktreeApi 实例。
- * @param options - 输入：`WebFetchOptions & object` — 配置选项
+ * @param options - 输入：`RocktreeApiOptions` — baseUrl、WebFetch 与 header 配置
  * @returns 输出：`RocktreeApi` — Rocktree API 实例
  */
 ```
@@ -1408,29 +1481,87 @@ logLevelFromEnv(): DEBUG | INFO | WARN | …
 
 </details>
 
-*源文件：`src/fetch/BrowserFingerprintCodec.ts`*
+*源文件：`src/fetch/TlsFingerprintCodec.ts`*
 
-#### mergeHeaderRecords
+#### mergeBrowserEmulation
 
 ```typescript
-mergeHeaderRecords(layers: undefined | Headers[]): Record<string, string>
+mergeBrowserEmulation(base: "chrome_100" | "chrome_101" | "chrome_104" | …, override: undefined | "chrome_100" | "chrome_101" | …): "chrome_100" | "chrome_101" | "chrome_104" | …
 ```
 
-执行 mergeHeaderRecords。
+执行 mergeBrowserEmulation。
 
 | 参数 | 说明 |
 |------|------|
-| `layers` | 输入：`undefined \| Headers[]` — layers 参数 |
+| `base` | 输入：`"chrome_100" \| "chrome_101" \| "chrome_104" \| …` — 基础 URL |
+| `override` | 输入：`undefined \| "chrome_100" \| "chrome_101" \| …` — override 参数 |
 
-**返回：** 输出：`Record<string, string>` — Record<string, string> 实例
+**返回：** 输出：`"chrome_100" | "chrome_101" | "chrome_104" | …` — "chrome_100" | "chrome_101" | "chrome_104" | … 实例
 
 <details><summary>原始 JSDoc</summary>
 
 ```typescript
 /**
- * 执行 mergeHeaderRecords。
- * @param layers - 输入：`undefined | Headers[]` — layers 参数
- * @returns 输出：`Record<string, string>` — Record<string, string> 实例
+ * 执行 mergeBrowserEmulation。
+ * @param base - 输入：`"chrome_100" | "chrome_101" | "chrome_104" | …` — 基础 URL
+ * @param override - 输入：`undefined | "chrome_100" | "chrome_101" | …` — override 参数
+ * @returns 输出：`"chrome_100" | "chrome_101" | "chrome_104" | …` — "chrome_100" | "chrome_101" | "chrome_104" | … 实例
+ */
+```
+
+</details>
+
+*源文件：`src/fetch/TlsFingerprintCodec.ts`*
+
+#### cloneBrowserEmulation
+
+```typescript
+cloneBrowserEmulation(config: "chrome_100" | "chrome_101" | "chrome_104" | …): "chrome_100" | "chrome_101" | "chrome_104" | …
+```
+
+执行 cloneBrowserEmulation。
+
+| 参数 | 说明 |
+|------|------|
+| `config` | 输入：`"chrome_100" \| "chrome_101" \| "chrome_104" \| …` — config 参数 |
+
+**返回：** 输出：`"chrome_100" | "chrome_101" | "chrome_104" | …` — "chrome_100" | "chrome_101" | "chrome_104" | … 实例
+
+<details><summary>原始 JSDoc</summary>
+
+```typescript
+/**
+ * 执行 cloneBrowserEmulation。
+ * @param config - 输入：`"chrome_100" | "chrome_101" | "chrome_104" | …` — config 参数
+ * @returns 输出：`"chrome_100" | "chrome_101" | "chrome_104" | …` — "chrome_100" | "chrome_101" | "chrome_104" | … 实例
+ */
+```
+
+</details>
+
+*源文件：`src/fetch/TlsFingerprintCodec.ts`*
+
+#### mergeHeaderRecords
+
+```typescript
+mergeHeaderRecords(layers: undefined | Record<string, string>[]): Record<string, string>
+```
+
+按顺序合并多层请求头（后者覆盖前者）。
+
+| 参数 | 说明 |
+|------|------|
+| `layers` | 输入：`Record<string, string> \| undefined` — context、overrides、perRequest |
+
+**返回：** 输出：`Record<string, string>` — 合并后的请求头
+
+<details><summary>原始 JSDoc</summary>
+
+```typescript
+/**
+ * 按顺序合并多层请求头（后者覆盖前者）。
+ * @param layers - 输入：`Record<string, string> | undefined` — context、overrides、perRequest
+ * @returns 输出：`Record<string, string>` — 合并后的请求头
  */
 ```
 
@@ -1448,7 +1579,7 @@ createWebFetch(options: WebFetchOptions): WebFetch
 
 | 参数 | 说明 |
 |------|------|
-| `options` | 输入：`WebFetchOptions` — 配置选项 |
+| `options` | 输入：`WebFetchOptions` — TLS 指纹与 header 配置 |
 
 **返回：** 输出：`WebFetch` — WebFetch 实例
 
@@ -1457,8 +1588,38 @@ createWebFetch(options: WebFetchOptions): WebFetch
 ```typescript
 /**
  * 创建 WebFetch 实例。
- * @param options - 输入：`WebFetchOptions` — 配置选项
+ * @param options - 输入：`WebFetchOptions` — TLS 指纹与 header 配置
  * @returns 输出：`WebFetch` — WebFetch 实例
+ */
+```
+
+</details>
+
+*源文件：`src/fetch/WebFetch.ts`*
+
+#### mergeTlsFingerprint
+
+```typescript
+mergeTlsFingerprint(base: undefined | "chrome_100" | "chrome_101" | …, override: undefined | "chrome_100" | "chrome_101" | …): undefined | "chrome_100" | "chrome_101" | …
+```
+
+执行 mergeTlsFingerprint。
+
+| 参数 | 说明 |
+|------|------|
+| `base` | 输入：`undefined \| "chrome_100" \| "chrome_101" \| …` — 基础 URL |
+| `override` | 输入：`undefined \| "chrome_100" \| "chrome_101" \| …` — override 参数 |
+
+**返回：** 输出：`undefined | "chrome_100" | "chrome_101" | …` — undefined | "chrome_100" | "chrome_101" | … 实例
+
+<details><summary>原始 JSDoc</summary>
+
+```typescript
+/**
+ * 执行 mergeTlsFingerprint。
+ * @param base - 输入：`undefined | "chrome_100" | "chrome_101" | …` — 基础 URL
+ * @param override - 输入：`undefined | "chrome_100" | "chrome_101" | …` — override 参数
+ * @returns 输出：`undefined | "chrome_100" | "chrome_101" | …` — undefined | "chrome_100" | "chrome_101" | … 实例
  */
 ```
 
@@ -1466,4 +1627,4 @@ createWebFetch(options: WebFetchOptions): WebFetch
 
 ---
 
-共 **16** 个类、**50** 个 public API。
+共 **16** 个类、**56** 个 public API。

@@ -7,6 +7,26 @@
 
 （尚无条目。）
 
+## [0.0.3] - 2026-09-02
+
+### 新增
+
+- `TlsFingerprintCodec`：基于 `node-wreq` 的 TLS/JA3/JA4/HTTP2 浏览器 profile（100+ 内置 profile）
+- `WebFetch` 默认使用 node-wreq 原生传输层，而非 Node 内置 `fetch`
+
+### 变更
+
+- 移除 `header-generator` 与 `BrowserFingerprintCodec`（仅 HTTP 头，非 TLS 指纹）
+- Node 引擎要求提升至 `>=20`（node-wreq 依赖）
+
+### 修复
+
+- （无）
+
+### 移除
+
+- `BrowserFingerprintCodec.ts`、`header-generator` 依赖
+
 ## [0.0.2] - 2026-09-02
 
 ### 新增

@@ -177,6 +177,7 @@ export function defaultReturnDescription(methodName: string, returnType: string)
     RocktreeApi: "Rocktree API 实例",
     WebFetch: "WebFetch 实例",
     BrowserFingerprintCodec: "浏览器指纹 codec 实例",
+    TlsFingerprintCodec: "TLS 浏览器指纹 codec 实例",
   };
   return named[returnType] ?? `${returnType} 实例`;
 }

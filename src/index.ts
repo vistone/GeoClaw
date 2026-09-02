@@ -55,19 +55,24 @@ export {
   WebFetch,
   webFetch,
   createWebFetch,
+  EARTH_WEB_CONTEXT_HEADERS,
 } from "./fetch/WebFetch.js";
-export type { WebFetchOptions, WebFetchGetOptions } from "./fetch/WebFetch.js";
+export type { WebFetchOptions, WebFetchGetOptions, TlsFetchFn } from "./fetch/WebFetch.js";
 
 export {
-  BrowserFingerprintCodec,
-  browserFingerprintCodec,
-  EARTH_WEB_CONTEXT_HEADERS,
-  DEFAULT_BROWSER_FINGERPRINT,
-} from "./fetch/BrowserFingerprintCodec.js";
+  TlsFingerprintCodec,
+  tlsFingerprintCodec,
+  DEFAULT_TLS_FINGERPRINT,
+  DEFAULT_TLS_BROWSER_PROFILE,
+  BROWSER_TLS_PROFILES,
+} from "./fetch/TlsFingerprintCodec.js";
 export type {
-  BrowserFingerprintConfig,
-  RequestHeaderConfig,
-} from "./fetch/BrowserFingerprintCodec.js";
+  TlsFingerprintConfig,
+  TlsRequestConfig,
+  BrowserProfile,
+  BrowserPlatform,
+  BrowserEmulationOptions,
+} from "./fetch/TlsFingerprintCodec.js";
 
 export {
   RocktreeApi,
