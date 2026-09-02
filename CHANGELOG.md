@@ -7,6 +7,26 @@
 
 （尚无条目。）
 
+## [0.0.5] - 2026-09-02
+
+### 新增
+
+- `WebFetch.getBytesWithTrace` 与 `FetchTransportTrace`：可观测 TLS profile、HTTP/2 配置、TLS 证书与耗时
+- `npm run inspect:fetch` 传输层诊断脚本
+- `test/web-fetch-transport-live.test.ts` 线上传输断言
+
+### 变更
+
+- （无）
+
+### 修复
+
+- （无）
+
+### 移除
+
+- （无）
+
 ## [0.0.4] - 2026-09-02
 
 ### 新增

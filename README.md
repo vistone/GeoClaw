@@ -2,7 +2,7 @@
 
 Google Earth **RockTree / GlobeTrotter** 的 Node.js TypeScript 工具库：Protobuf 编解码、Bulk 元数据解析，以及带 **TLS 浏览器指纹**（JA3/JA4/HTTP2）的 HTTP 抓取。
 
-当前版本：**0.0.4**
+当前版本：**0.0.5**
 
 ## 特性
 
@@ -84,6 +84,54 @@ console.log(BROWSER_TLS_PROFILES.includes("chrome_131"));
 ```
 
 Header 合并优先级：**node-wreq profile 默认头 → contextHeaders → headerOverrides → 单次 headers**。Protobuf 响应默认强制 `Accept-Encoding: identity`。
+
+## 如何确认 fetch 走了哪些协议
+
+GeoClaw 默认 **不用** Node 内置 `fetch`，而是 **node-wreq** 原生层，协议栈如下：
+
+```
+HTTPS URL
+  → TLS 1.3 握手（ClientHello 指纹 = browser profile，如 chrome_128 / JA3·JA4）
+  → ALPN 协商（profile.http2: true 时优先 h2）
+  → HTTP/2 或 HTTP/1.1 请求（profile 默认头 + GeoClaw context/overrides）
+  → 响应 protobuf 字节
+```
+
+### 一键诊断
+
+```bash
+npm run inspect:fetch
+# 或指定 URL
+npm run inspect:fetch -- https://kh.google.com/rt/earth/PlanetoidMetadata
+```
+
+会打印 `FetchTransportTrace`：`transport`、`browser`、`http2FingerprintEnabled`、TLS 证书链、首字节耗时等。
+
+### 代码里拿 trace
+
+```typescript
+import { createWebFetch } from "geoclaw";
+
+const wf = createWebFetch();
+const { bytes, trace } = await wf.getBytesWithTrace(url, { trace: true });
+console.log(trace.transport);           // "node-wreq"
+console.log(trace.browser);             // { profile: "chrome_128", platform: "linux", http2: true, ... }
+console.log(trace.http2FingerprintEnabled);
+console.log(trace.tlsPeer);             // 对端证书（需 trace: true）
+console.log(trace.likelyHttp2Response); // 响应头全小写 → 多为 HTTP/2
+```
+
+### DEBUG 日志
+
+```bash
+GEOCLAW_LOG_LEVEL=debug npm run fetch:planetoid
+```
+
+### 集成测试
+
+```bash
+npm test   # 含 test/web-fetch-transport-live.test.ts，对 kh.google.com 断言 node-wreq + TLS
+```
 
 ## Rocktree API
 
