@@ -58,6 +58,8 @@ export type GeoClawConfigFile = {
     reheatBackoffMs: number;
     deniedBackoffMs: number;
     fallbackToHostPin: boolean;
+    taskConcurrency: number;
+    maxTaskAttempts: number | null;
   };
 };
 
@@ -306,6 +308,28 @@ export class GeoClawConfig {
 
   getWarmPoolFallbackToHostPin(): boolean {
     return this.file.warmPool?.fallbackToHostPin ?? false;
+  }
+
+  /**
+   * FetchTaskPool 并发与重试上限。
+   * @returns 输出：`{ concurrency, maxAttempts }` — 任务池配置
+   */
+
+  getFetchTaskPoolOptions(): { concurrency: number; maxAttempts: number | null } {
+    const warm = this.file.warmPool;
+    return {
+      concurrency: warm?.taskConcurrency ?? 50,
+      maxAttempts: warm?.maxTaskAttempts ?? null,
+    };
+  }
+
+  /**
+   * 热池 / fetch 成功 HTTP 状态码。
+   * @returns 输出：`number` — 通常 200
+   */
+
+  getWarmPoolSuccessStatus(): number {
+    return this.file.warmPool?.successStatus ?? 200;
   }
 
   /**

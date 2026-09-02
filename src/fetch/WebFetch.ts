@@ -9,6 +9,7 @@ import {
   createHotConnectionPoolFromConfig,
   HotConnectionPool,
 } from "./HotConnectionPool.js";
+import { FetchTaskPool } from "./FetchTaskPool.js";
 import {
   TlsFingerprintCodec,
   type TlsFingerprintConfig,
@@ -122,6 +123,7 @@ export class WebFetch {
       tlsFingerprintCodec: TlsFingerprintCodec;
       hostPinPool?: HostPinPool;
       hotConnectionPool?: HotConnectionPool;
+      fetchTaskPool?: FetchTaskPool;
       warmPoolFallbackToHostPin: boolean;
       proxyMode: ProxyMode;
       proxyUrl?: string;
@@ -133,6 +135,15 @@ export class WebFetch {
 
   constructor(options: WebFetchOptions = {}) {
     const cfg = GeoClawConfig.get();
+    const hotConnectionPool =
+      options.hotConnectionPool === false
+        ? undefined
+        : (options.hotConnectionPool ?? createHotConnectionPoolFromConfig());
+    const fetchTaskPool =
+      hotConnectionPool !== undefined
+        ? new FetchTaskPool(hotConnectionPool, cfg.getFetchTaskPoolOptions())
+        : undefined;
+
     this.options = {
       fetch: options.fetch,
       tlsFingerprint: options.tlsFingerprint ?? cfg.getTlsFingerprint(),
@@ -146,10 +157,8 @@ export class WebFetch {
         options.hostPinPool === false
           ? undefined
           : (options.hostPinPool ?? createHostPinPoolFromConfig()),
-      hotConnectionPool:
-        options.hotConnectionPool === false
-          ? undefined
-          : (options.hotConnectionPool ?? createHotConnectionPoolFromConfig()),
+      hotConnectionPool,
+      fetchTaskPool,
       warmPoolFallbackToHostPin: cfg.getWarmPoolFallbackToHostPin(),
       proxyMode: options.proxyMode ?? cfg.getProxyMode(),
       proxyUrl:
@@ -235,6 +244,7 @@ export class WebFetch {
         });
 
         if (!res.ok) {
+          void res.arrayBuffer().catch(() => undefined);
           WebFetch.logger.error("HTTP 请求失败", { status: res.status, url });
           throw new Error(`HTTP ${res.status} ${res.statusText}: ${url}`);
         }
@@ -301,18 +311,18 @@ export class WebFetch {
     browser: TlsFingerprintConfig,
     collectTls: boolean,
   ): Promise<WebFetchResult> {
-    const pool = this.options.hotConnectionPool!;
+    const taskPool = this.options.fetchTaskPool!;
     const perRequestHeaders = getOptions.headers ?? {};
     const merged =
       Object.keys(perRequestHeaders).length > 0
         ? { ...extraHeaders, ...perRequestHeaders }
         : extraHeaders;
 
-    const { response, ip, timings } = await pool.fetchGet(url, merged);
+    const { response, ip, timings } = await taskPool.submit(url, merged);
     const proxy = this.resolveProxy(ip, getOptions);
 
-    if (!response.ok) {
-      WebFetch.logger.error("热连接 HTTP 失败", { status: response.status, url, ip });
+    if (response.status !== GeoClawConfig.get().getWarmPoolSuccessStatus()) {
+      WebFetch.logger.error("热连接 HTTP 非 200", { status: response.status, url, ip });
       throw new Error(`HTTP ${response.status} ${response.statusText}: ${url}`);
     }
 

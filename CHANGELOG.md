@@ -7,6 +7,19 @@
 
 （尚无条目。）
 
+## [0.0.11] - 2026-09-02
+
+### 新增
+
+- `FetchTaskPool`：非 200 单次尝试后立即回队，worker 不阻塞、不在同一调用内换 IP 重试
+- `HotConnectionPool.fetchOnce`：单 IP 单试；非 200 快速丢弃响应体并移出热池
+- `warmPool.taskConcurrency` / `maxTaskAttempts` 配置项
+
+### 变更
+
+- 热路径 fetch 经 `FetchTaskPool.submit()` 异步重试，403/429/传输失败仅回队不等待
+- 冷路径非 2xx 同样不读满 body，立即抛错
+
 ## [0.0.10] - 2026-09-02
 
 ### 新增

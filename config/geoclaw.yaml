@@ -33,7 +33,7 @@ hostPin:
   family: all
 
 benchmark:
-  concurrency: 20
+  concurrency: 200
   timeoutMs: 20000
   outDir: benchmark
   planetoidPath: PlanetoidMetadata
@@ -52,3 +52,5 @@ warmPool:
   reheatBackoffMs: 30000
   deniedBackoffMs: 60000
   fallbackToHostPin: false
+  taskConcurrency: 50
+  maxTaskAttempts: null

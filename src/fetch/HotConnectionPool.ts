@@ -11,6 +11,11 @@ import type { ProxyMode } from "./FetchTypes.js";
 import { parseKhGoogleYaml, type HostPinRecord } from "./HostPinPool.js";
 import { resolveProxyUrl } from "./FetchTypes.js";
 import type { TlsFingerprintConfig } from "./TlsFingerprintCodec.js";
+import {
+  HotFetchNoHotIpError,
+  HotFetchNotOkError,
+  HotFetchTransportError,
+} from "./FetchErrors.js";
 
 /** 单 IP 槽位状态 */
 export type HotSlotState = "pending" | "warming" | "hot" | "denied" | "failed";
@@ -206,14 +211,16 @@ export class HotConnectionPool {
   }
 
   /**
-   * 通过热连接发 GET；403/429 移出热池并换下一个 IP 重试。
+   * 单次热连接 GET：只用一个 IP、只试一次；非 200 立即抛弃并移出热池。
    * @param url - 输入：`string` — 完整 URL
    * @param extraHeaders - 输入：`Record<string, string>` — 单次附加头
-   * @returns 输出：`Promise<{ response, ip, timings? }>` — node-wreq 响应与所用 IP
-   * @throws {Error} 无热连接或全部热 IP 均失败时
+   * @returns 输出：`Promise<{ response, ip, timings? }>` — 仅 successStatus 时返回
+   * @throws {HotFetchNotOkError} HTTP 非 successStatus
+   * @throws {HotFetchTransportError} 传输失败
+   * @throws {HotFetchNoHotIpError} 无热连接
    */
 
-  async fetchGet(
+  async fetchOnce(
     url: string,
     extraHeaders: Record<string, string> = {},
   ): Promise<{
@@ -222,53 +229,57 @@ export class HotConnectionPool {
     timings?: RequestTimings;
   }> {
     if (this.hotIps.length === 0) {
-      throw new Error("HotConnectionPool: no hot connections available");
+      throw new HotFetchNoHotIpError();
     }
 
-    const attempts = this.hotIps.length;
-    let lastError: Error | undefined;
-
-    for (let n = 0; n < attempts; n++) {
-      const ip = this.pickHotIp();
-      const slot = this.slots.get(ip);
-      if (!slot?.client) {
-        continue;
-      }
-
-      let stats: RequestStats | undefined;
-      try {
-        const response = await slot.client.get(url, {
-          headers: extraHeaders,
-          ...(this.options.timeoutMs !== undefined ? { timeout: this.options.timeoutMs } : {}),
-          onStats: (s: RequestStats) => {
-            stats = s;
-          },
-        });
-
-        const outcome = classifyWarmHttpStatus(
-          response.status,
-          this.options.successStatus,
-          this.options.deniedStatuses,
-        );
-
-        if (outcome === "hot") {
-          return { response, ip, timings: response.wreq.timings ?? stats?.timings };
-        }
-
-        await response.arrayBuffer().catch(() => undefined);
-        if (outcome === "denied") {
-          this.evictToReheat(ip, "denied", response.status);
-        } else {
-          this.evictToReheat(ip, "failed", response.status);
-        }
-        lastError = new Error(`HTTP ${response.status} via hot IP ${ip}`);
-      } catch (err) {
-        this.evictToReheat(ip, "failed", undefined, err);
-        lastError = err instanceof Error ? err : new Error(String(err));
-      }
+    const ip = this.pickHotIp();
+    const slot = this.slots.get(ip);
+    if (!slot?.client) {
+      throw new HotFetchNoHotIpError();
     }
 
-    throw lastError ?? new Error("HotConnectionPool: all hot IPs failed");
+    let stats: RequestStats | undefined;
+    try {
+      const response = await slot.client.get(url, {
+        headers: extraHeaders,
+        ...(this.options.timeoutMs !== undefined ? { timeout: this.options.timeoutMs } : {}),
+        onStats: (s: RequestStats) => {
+          stats = s;
+        },
+      });
+
+      if (response.status === this.options.successStatus) {
+        return { response, ip, timings: response.wreq.timings ?? stats?.timings };
+      }
+
+      void response.arrayBuffer().catch(() => undefined);
+      const kind = this.options.deniedStatuses.includes(response.status) ? "denied" : "failed";
+      this.evictToReheat(ip, kind, response.status);
+      throw new HotFetchNotOkError(response.status, ip);
+    } catch (err) {
+      if (err instanceof HotFetchNotOkError) {
+        throw err;
+      }
+      this.evictToReheat(ip, "failed", undefined, err);
+      throw new HotFetchTransportError(ip, err);
+    }
+  }
+
+  /**
+   * @deprecated 使用 fetchOnce + FetchTaskPool；不在此方法内重试
+   * @param url - 输入：`string` — 完整 URL
+   * @param extraHeaders - 输入：`Record<string, string>` — 附加头
+   * @returns 输出：`Promise<{ response, ip, timings? }>` — 同 fetchOnce
+   */
+  async fetchGet(
+    url: string,
+    extraHeaders: Record<string, string> = {},
+  ): Promise<{
+    response: Awaited<ReturnType<Client["get"]>>;
+    ip: string;
+    timings?: RequestTimings;
+  }> {
+    return this.fetchOnce(url, extraHeaders);
   }
 
   /**

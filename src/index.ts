@@ -69,6 +69,16 @@ export type {
   HotPoolStats,
 } from "./fetch/HotConnectionPool.js";
 
+export { FetchTaskPool } from "./fetch/FetchTaskPool.js";
+export type { FetchTaskPoolOptions, FetchTaskResult } from "./fetch/FetchTaskPool.js";
+export {
+  HotFetchNotOkError,
+  HotFetchTransportError,
+  HotFetchNoHotIpError,
+  FetchTaskMaxAttemptsError,
+  isFetchRequeueError,
+} from "./fetch/FetchErrors.js";
+
 export {
   WebFetch,
   webFetch,

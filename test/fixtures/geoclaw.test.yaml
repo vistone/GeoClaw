@@ -49,3 +49,5 @@ warmPool:
   reheatBackoffMs: 1000
   deniedBackoffMs: 2000
   fallbackToHostPin: true
+  taskConcurrency: 2
+  maxTaskAttempts: null
