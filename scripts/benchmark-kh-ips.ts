@@ -15,9 +15,12 @@ import { fileURLToPath } from "node:url";
 import { fetch } from "node-wreq";
 
 import {
+  DEFAULT_GEOCLAW_PROXY,
   DEFAULT_TLS_FINGERPRINT,
   EARTH_WEB_CONTEXT_HEADERS,
   parseKhGoogleYaml,
+  resolveProxyUrl,
+  type ProxyMode,
 } from "../src/index.js";
 
 const TARGET_URL = "https://kh.google.com/rt/earth/PlanetoidMetadata";
@@ -44,6 +47,8 @@ type CliOptions = {
   family: "all" | "ipv4" | "ipv6";
   limit: number | null;
   outDir: string;
+  proxy?: string;
+  proxyMode: ProxyMode;
 };
 
 function parseArgs(argv: string[]): CliOptions {
@@ -54,6 +59,8 @@ function parseArgs(argv: string[]): CliOptions {
     family: "all",
     limit: null,
     outDir: join(process.cwd(), "benchmark"),
+    proxy: DEFAULT_GEOCLAW_PROXY,
+    proxyMode: "auto",
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -64,13 +71,22 @@ function parseArgs(argv: string[]): CliOptions {
     else if (a === "--family" && argv[i + 1]) opts.family = argv[++i]! as CliOptions["family"];
     else if (a === "--limit" && argv[i + 1]) opts.limit = Number(argv[++i]!);
     else if (a === "--out" && argv[i + 1]) opts.outDir = argv[++i]!;
+    else if (a === "--proxy" && argv[i + 1]) opts.proxy = argv[++i]!;
+    else if (a === "--no-proxy") opts.proxy = undefined;
+    else if (a === "--proxy-mode" && argv[i + 1]) opts.proxyMode = argv[++i]! as ProxyMode;
   }
 
   return opts;
 }
 
-async function probeIp(record: { ip: string; family: "ipv4" | "ipv6" }, timeoutMs: number): Promise<KhIpBenchRow> {
+async function probeIp(
+  record: { ip: string; family: "ipv4" | "ipv6" },
+  timeoutMs: number,
+  proxy?: string,
+  proxyMode: ProxyMode = "auto",
+): Promise<KhIpBenchRow> {
   const started = Date.now();
+  const proxyUrl = resolveProxyUrl({ pinnedIp: record.ip, proxyMode, proxyUrl: proxy });
   try {
     const res = await fetch(TARGET_URL, {
       method: "GET",
@@ -84,6 +100,7 @@ async function probeIp(record: { ip: string; family: "ipv4" | "ipv6" }, timeoutM
           [HOSTNAME]: [record.ip],
         },
       },
+      ...(proxyUrl ? { proxy: proxyUrl } : {}),
       timeout: timeoutMs,
     });
 
@@ -172,6 +189,8 @@ async function main() {
   console.log("IP 数量:", records.length);
   console.log("并发:", opts.concurrency);
   console.log("超时(ms):", opts.timeoutMs);
+  console.log("代理:", opts.proxy ?? "(无)");
+  console.log("代理策略:", opts.proxyMode);
   console.log("结果:", jsonlPath);
   console.log("");
 
@@ -181,7 +200,7 @@ async function main() {
   let failCount = 0;
 
   const rows = await runPool(records, opts.concurrency, async (record, index) => {
-    const row = await probeIp(record, opts.timeoutMs);
+    const row = await probeIp(record, opts.timeoutMs, opts.proxy, opts.proxyMode);
     appendFileSync(jsonlPath, `${JSON.stringify(row)}\n`);
     done++;
     if (row.ok) okCount++;

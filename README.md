@@ -2,7 +2,7 @@
 
 Google Earth **RockTree / GlobeTrotter** 的 Node.js TypeScript 工具库：Protobuf 编解码、Bulk 元数据解析，以及带 **TLS 浏览器指纹**（JA3/JA4/HTTP2）的 HTTP 抓取。
 
-当前版本：**0.0.6**
+当前版本：**0.0.8**
 
 ## 特性
 
@@ -135,7 +135,33 @@ npm test   # 含 test/web-fetch-transport-live.test.ts，对 kh.google.com 断�
 
 ## HostPin（跳过 DNS，IP 轮询）
 
-`src/fetch/kh.google.com.yaml` 含 `kh.google.com` 全球 IPv4/IPv6。`WebFetch` **默认**每次请求轮询取一个 IP，通过 node-wreq `dns.hosts` 直连，**不经过系统 DNS**。
+`src/fetch/kh.google.com.yaml` 含 `kh.google.com` 全球 IPv4/IPv6。`WebFetch` **默认**每次请求轮询取一个 IP，通过 node-wreq `dns.hosts` 直连。
+
+### IPv6 与 SOCKS5 代理
+
+上次全量测速中 **1538 个 IPv6 全部失败**，原因是：HostPin 把连接直接打到 Google 的 IPv6 地址，但本机到这些地址 **没有可用路由/出口**（`error sending request`）。IPv4 直连正常。
+
+本地 SOCKS5（如 Clash `127.0.0.1:20170`）通常具备 IPv6 出口。GeoClaw 默认：
+
+- 代理：`socks5://127.0.0.1:20170`（可用环境变量 `GEOCLAW_PROXY` 覆盖）
+- 策略 `proxyMode: "auto"`：**仅 IPv6 HostPin 走代理**，IPv4 仍直连
+
+```typescript
+import { createWebFetch, DEFAULT_GEOCLAW_PROXY } from "geoclaw";
+
+const wf = createWebFetch(); // auto：IPv6 → SOCKS5，IPv4 → 直连
+
+const wfAllProxy = createWebFetch({ proxyMode: "always" }); // 全部走代理
+const wfNoProxy = createWebFetch({ proxy: false, proxyMode: "never" });
+```
+
+```bash
+# IPv6 测速（默认走 SOCKS5）
+npm run benchmark:kh-ips -- --family ipv6
+
+# 全部 IP 且 IPv6 走代理
+npm run benchmark:kh-ips -- --proxy-mode auto
+```
 
 ```typescript
 import { createWebFetch, khGoogleHostPinPool } from "geoclaw";

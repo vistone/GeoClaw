@@ -57,7 +57,8 @@ export {
   createWebFetch,
   EARTH_WEB_CONTEXT_HEADERS,
 } from "./fetch/WebFetch.js";
-export type { WebFetchOptions, WebFetchGetOptions, TlsFetchFn, FetchTransportTrace, WebFetchResult } from "./fetch/WebFetch.js";
+export type { WebFetchOptions, WebFetchGetOptions, TlsFetchFn, FetchTransportTrace, WebFetchResult, ProxyMode } from "./fetch/WebFetch.js";
+export { DEFAULT_GEOCLAW_PROXY, resolveProxyUrl } from "./fetch/WebFetch.js";
 
 export {
   TlsFingerprintCodec,

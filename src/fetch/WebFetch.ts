@@ -16,6 +16,13 @@ import {
 /** node-wreq fetch（TLS/JA3/HTTP2 浏览器指纹） */
 export type TlsFetchFn = typeof wreqFetch;
 
+/** SOCKS5/HTTP 代理使用策略 */
+export type ProxyMode = "auto" | "always" | "never";
+
+/** 默认 SOCKS5 代理（可通过 GEOCLAW_PROXY 覆盖） */
+export const DEFAULT_GEOCLAW_PROXY =
+  process.env.GEOCLAW_PROXY ?? "socks5://127.0.0.1:20170";
+
 /** 单次 GET 的传输层追踪信息 */
 export type FetchTransportTrace = {
   /** 请求 URL */
@@ -53,6 +60,10 @@ export type FetchTransportTrace = {
   pinnedIp?: string;
   /** 是否绕过系统 DNS（使用 YAML HostPin） */
   dnsPinned: boolean;
+  /** 本次请求使用的代理 URL */
+  proxy?: string;
+  /** 代理策略 */
+  proxyMode?: ProxyMode;
 };
 
 /** GET 结果：字节 + 传输追踪 */
@@ -68,6 +79,10 @@ export type WebFetchGetOptions = {
   tlsFingerprint?: TlsFingerprintConfig;
   /** 为 true 时收集 TLS 证书与完整 trace（默认 false） */
   trace?: boolean;
+  /** 单次代理 URL；false 表示禁用 */
+  proxy?: string | false;
+  /** 单次代理策略覆盖 */
+  proxyMode?: ProxyMode;
 };
 
 export type WebFetchOptions = {
@@ -89,6 +104,13 @@ export type WebFetchOptions = {
   logTransportTrace?: boolean;
   /** HostPin 池；false 关闭；默认 kh.google.com YAML 轮询 */
   hostPinPool?: HostPinPool | false;
+  /** 代理 URL；false 禁用；默认 DEFAULT_GEOCLAW_PROXY */
+  proxy?: string | false;
+  /**
+   * 代理策略：auto=仅 IPv6 HostPin 走代理，always=全部走代理，never=不走代理
+   * @default "auto"
+   */
+  proxyMode?: ProxyMode;
 };
 
 /**
@@ -102,6 +124,8 @@ export class WebFetch {
     Pick<WebFetchOptions, "fetch" | "tlsFingerprint" | "timeout"> & {
       tlsFingerprintCodec: TlsFingerprintCodec;
       hostPinPool?: HostPinPool;
+      proxyMode: ProxyMode;
+      proxyUrl?: string;
     };
 
   /**
@@ -120,6 +144,11 @@ export class WebFetch {
       logTransportTrace: options.logTransportTrace ?? false,
       hostPinPool:
         options.hostPinPool === false ? undefined : (options.hostPinPool ?? khGoogleHostPinPool),
+      proxyMode: options.proxyMode ?? "auto",
+      proxyUrl:
+        options.proxy === false
+          ? undefined
+          : (typeof options.proxy === "string" ? options.proxy : DEFAULT_GEOCLAW_PROXY),
     };
   }
 
@@ -157,6 +186,7 @@ export class WebFetch {
         const extraHeaders = this.buildHeaders(getOptions);
         const collectTls = getOptions.trace ?? this.options.logTransportTrace;
         const hostPin = this.options.hostPinPool?.resolveForUrl(url);
+        const proxy = this.resolveProxy(hostPin?.pinnedIp, getOptions);
 
         WebFetch.logger.debug("发起 TLS GET", {
           url,
@@ -164,6 +194,7 @@ export class WebFetch {
           browser,
           extraHeaderKeys: Object.keys(extraHeaders),
           pinnedIp: hostPin?.pinnedIp,
+          proxy,
         });
 
         let stats: RequestStats | undefined;
@@ -173,6 +204,7 @@ export class WebFetch {
           headers: extraHeaders,
           ...(this.options.timeout !== undefined ? { timeout: this.options.timeout } : {}),
           ...(hostPin ? { dns: hostPin.dns } : {}),
+          ...(proxy ? { proxy } : {}),
           ...(collectTls ? { tlsDebug: { peerCertificates: true } } : {}),
           onStats: (s: RequestStats) => {
             stats = s;
@@ -199,6 +231,8 @@ export class WebFetch {
           requestHostname: hostPin?.hostname ?? new URL(url).hostname,
           pinnedIp: hostPin?.pinnedIp,
           dnsPinned: Boolean(hostPin),
+          proxy,
+          proxyMode: getOptions.proxyMode ?? this.options.proxyMode,
         });
 
         if (this.options.logTransportTrace || getOptions.trace) {
@@ -255,6 +289,24 @@ export class WebFetch {
       { perRequestKeys: Object.keys(getOptions.headers ?? {}) },
     );
   }
+
+  /**
+   * 解析本次请求是否走 SOCKS5/HTTP 代理。
+   * @param pinnedIp - 输入：`string | undefined` — HostPin 轮询 IP
+   * @param getOptions - 输入：`WebFetchGetOptions` — 单次 proxy / proxyMode 覆盖
+   * @returns 输出：`string | undefined` — 代理 URL 或 undefined
+   */
+
+  resolveProxy(pinnedIp?: string, getOptions: WebFetchGetOptions = {}): string | undefined {
+    return resolveProxyUrl({
+      pinnedIp,
+      proxyMode: getOptions.proxyMode ?? this.options.proxyMode,
+      proxyUrl:
+        getOptions.proxy === false
+          ? undefined
+          : (typeof getOptions.proxy === "string" ? getOptions.proxy : this.options.proxyUrl),
+    });
+  }
 }
 
 export const webFetch = new WebFetch();
@@ -306,6 +358,8 @@ function buildTransportTrace(args: {
   requestHostname?: string;
   pinnedIp?: string;
   dnsPinned: boolean;
+  proxy?: string;
+  proxyMode?: ProxyMode;
 }): FetchTransportTrace {
   const responseHeaderKeys = Object.keys(args.responseHeaders);
   const likelyHttp2Response =
@@ -334,7 +388,31 @@ function buildTransportTrace(args: {
     requestHostname: args.requestHostname,
     pinnedIp: args.pinnedIp,
     dnsPinned: args.dnsPinned,
+    proxy: args.proxy,
+    proxyMode: args.proxyMode,
   };
+}
+
+/**
+ * 按策略决定是否使用代理 URL。
+ * @param input - 输入：`object` — pinnedIp、proxyMode、proxyUrl
+ * @returns 输出：`string | undefined` — 代理 URL
+ */
+export function resolveProxyUrl(input: {
+  pinnedIp?: string;
+  proxyMode: ProxyMode;
+  proxyUrl?: string;
+}): string | undefined {
+  if (input.proxyMode === "never" || !input.proxyUrl) {
+    return undefined;
+  }
+  if (input.proxyMode === "always") {
+    return input.proxyUrl;
+  }
+  if (input.pinnedIp?.includes(":")) {
+    return input.proxyUrl;
+  }
+  return undefined;
 }
 
 /**

@@ -27,6 +27,7 @@ console.log("browser profile:", trace.browser);
 console.log("TLS ClientHello 指纹 (JA3/JA4): 由 profile 在 node-wreq 原生层模拟");
 console.log("HTTP/2 指纹已配置:", trace.http2FingerprintEnabled);
 console.log("DNS 直连 HostPin:", trace.dnsPinned, trace.pinnedIp);
+console.log("SOCKS5 代理:", trace.proxy ?? "(无)", trace.proxyMode);
 console.log("profile 默认头已配置:", trace.profileHeadersEnabled);
 console.log("GeoClaw 附加头:", trace.extraHeaders);
 console.log("");

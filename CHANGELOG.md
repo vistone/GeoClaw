@@ -7,6 +7,22 @@
 
 （尚无条目。）
 
+## [0.0.8] - 2026-09-02
+
+### 新增
+
+- SOCKS5 代理：`DEFAULT_GEOCLAW_PROXY`（默认 `socks5://127.0.0.1:20170`）
+- `proxyMode: auto` — IPv6 HostPin 走代理，IPv4 直连
+- `resolveProxyUrl`、`WebFetch.resolveProxy`；trace 增加 `proxy` 字段
+
+### 变更
+
+- `benchmark:kh-ips` 默认启用 SOCKS5（`--no-proxy` 可关闭）
+
+### 修复
+
+- IPv6 HostPin 在无本地 IPv6 出口时可通过 SOCKS5 访问
+
 ## [0.0.7] - 2026-09-02
 
 ### 新增
