@@ -52,13 +52,11 @@ export class FetchTaskPool {
   private activeWorkers = 0;
 
   /**
-   * 构造实例。
-   * @param hotPool - 输入：`HotConnectionPool` — hotPool 参数
-   * @param options - 输入：`FetchTaskPoolOptions` — 配置选项
-   * @param metrics - 输入：`undefined | FetchMetrics` — metrics 参数
-   * @returns 输出：`FetchTaskPool` — FetchTaskPool 实例
+   * 绑定热池与并发上限初始化任务池。
+   * @param hotPool - 输入：`HotConnectionPool` — 提供 fetchOnce 的热连接池
+   * @param options - 输入：`FetchTaskPoolOptions` — 并发与最大尝试次数
+   * @param metrics - 输入：`undefined | FetchMetrics` — 可选请求指标收集器
    */
-
   constructor(
     hotPool: HotConnectionPool,
     options: FetchTaskPoolOptions,
@@ -70,39 +68,43 @@ export class FetchTaskPool {
   }
 
   /**
-   * 执行 submit。
+   * 将 URL 入队并由 worker 异步拉取直至成功或超限。
    * @param url - 输入：`string` — 完整 HTTP URL
-   * @param headers - 输入：`Record<string, string>` — headers 参数
-   * @param requestId - 输入：`undefined | string` — requestId 参数
-   * @returns 输出：`Promise<FetchTaskResult>` — 异步返回 FetchTaskResult
+   * @param headers - 输入：`Record<string, string>` — 附加请求头
+   * @param requestId - 输入：`undefined | string` — 业务请求 ID；省略则自动生成
+   * @returns 输出：`Promise<FetchTaskResult>` — 成功响应、选用 IP 与 timings
    */
-
   submit(
     url: string,
     headers: Record<string, string> = {},
     requestId?: string,
   ): Promise<FetchTaskResult> {
-    const rid = requestId ?? this.metrics?.createRequestId() ?? cryptoRandomId();
-    this.metrics?.onRequestStart(rid, url);
+    return FetchTaskPool.logger.measureAsync(
+      "submit",
+      () => {
+        const rid = requestId ?? this.metrics?.createRequestId() ?? cryptoRandomId();
+        this.metrics?.onRequestStart(rid, url);
 
-    return new Promise((resolve, reject) => {
-      this.queue.push({
-        requestId: rid,
-        url,
-        headers,
-        attempts: 0,
-        resolve: (result) => resolve({ ...result, requestId: rid }),
-        reject,
-      });
-      this.pump();
-    });
+        return new Promise((resolve, reject) => {
+          this.queue.push({
+            requestId: rid,
+            url,
+            headers,
+            attempts: 0,
+            resolve: (result) => resolve({ ...result, requestId: rid }),
+            reject,
+          });
+          this.pump();
+        });
+      },
+      { url, requestId: requestId ?? null },
+    );
   }
 
   /**
-   * 执行 pendingCount。
-   * @returns 输出：`number` — 数值结果
+   * 返回排队中与执行中的任务总数。
+   * @returns 输出：`number` — queue.length + activeWorkers
    */
-
   pendingCount(): number {
     return this.queue.length + this.activeWorkers;
   }
@@ -111,7 +113,6 @@ export class FetchTaskPool {
    * 启动 worker 消费队列。
    * @returns 输出：无（`void`）
    */
-
   private pump(): void {
     while (this.activeWorkers < this.options.concurrency && this.queue.length > 0) {
       const task = this.queue.shift()!;
@@ -126,9 +127,8 @@ export class FetchTaskPool {
   /**
    * 执行单次任务尝试；失败则立即回队。
    * @param task - 输入：`PendingTask` — 待执行任务
-   * @returns 输出：`Promise<void>`
+   * @returns 输出：`Promise<void>` — 无返回值；成功 resolve 任务或回队
    */
-
   private async runTask(task: PendingTask): Promise<void> {
     task.attempts++;
 
@@ -228,10 +228,10 @@ export class FetchTaskPool {
 }
 
 /**
- * 执行 durationFromTimings。
- * @param timings - 输入：`undefined | RequestTimings` — timings 参数
- * @param fallbackStart - 输入：`number` — fallbackStart 参数
- * @returns 输出：`number` — 数值结果
+ * 从 timings 或回退起始时刻计算耗时毫秒。
+ * @param timings - 输入：`undefined | RequestTimings` — node-wreq 请求计时
+ * @param fallbackStart - 输入：`number` — 无 timings 时的 Date.now 起点
+ * @returns 输出：`number` — 优先 wait，其次 total，否则墙钟差
  */
 function durationFromTimings(
   timings: RequestTimings | undefined,
@@ -248,8 +248,8 @@ function durationFromTimings(
 }
 
 /**
- * 执行 cryptoRandomId。
- * @returns 输出：`string` — 字符串结果
+ * 生成临时请求 ID。
+ * @returns 输出：`string` — `req-{timestamp}-{随机段}` 形式
  */
 function cryptoRandomId(): string {
   return `req-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;

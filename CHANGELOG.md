@@ -7,6 +7,16 @@
 
 （尚无条目。）
 
+## [0.0.19] - 2026-09-03
+
+### 变更
+
+- 去掉主动限制：WS IP 统计增量不再 `MAX_DELTA` 封顶；摘要日志不再 TopN=5；WS 全量用 `includeRows=false` 而非 `topN=1` 凑合
+- 热池并发收口为单一 `warmPool.concurrency`（细分项仅作可选覆盖）；默认 `backoffMs: 0`
+- `HotConnectionPool.fetchOnce` / `runInitialWarmup` / `close` 补 `measureAsync`/`measureSync`
+- 导出 `HotFetchTimeoutError`；`ipinfo.token` 恢复为 `null`（用 `IPINFO_TOKEN`）
+- 规则书新增 §10.8 / `geoclaw-no-premature-limits.mdc`：未点名不加限制
+
 ## [0.0.18] - 2026-09-02
 
 ### 新增

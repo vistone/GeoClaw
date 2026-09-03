@@ -8,8 +8,8 @@ import { IpFetchStatsStore, type IpFetchStatsSeedIp } from "./IpFetchStatsStore.
 import { IpGeoRegistry } from "./IpGeoRegistry.js";
 
 /**
- * 创建 FetchMetricsFromConfig。
- * @returns 输出：`undefined | FetchMetrics` — undefined | FetchMetrics 实例
+ * 从 geoclaw.yaml 的 fetchMetrics 段创建指标收集器。
+ * @returns 输出：`undefined | FetchMetrics` — 未启用时为 undefined
  */
 export function createFetchMetricsFromConfig(): FetchMetrics | undefined {
   const opts = GeoClawConfig.get().getFetchMetricsOptions();
@@ -22,8 +22,8 @@ export function createFetchMetricsFromConfig(): FetchMetrics | undefined {
 }
 
 /**
- * 执行 buildIpGeoRegistryFromConfig。
- * @returns 输出：`IpGeoRegistry` — IpGeoRegistry 实例
+ * 从 HostPin/warmPool YAML 构建 IP 地理注册表。
+ * @returns 输出：`IpGeoRegistry` — 按 YAML IP 索引的地区表
  */
 export function buildIpGeoRegistryFromConfig(): IpGeoRegistry {
   const cfg = GeoClawConfig.get();
@@ -36,9 +36,9 @@ export function buildIpGeoRegistryFromConfig(): IpGeoRegistry {
 }
 
 /**
- * 创建 IpFetchStatsStoreFromConfig。
- * @param opts - 输入：`FetchMetricsOptions` — opts 参数
- * @returns 输出：`undefined | IpFetchStatsStore` — undefined | IpFetchStatsStore 实例
+ * 从 fetchMetrics 选项创建按域名分文件的 IP 统计存储。
+ * @param opts - 输入：`FetchMetricsOptions` — 含 ipStatsDir 与刷盘间隔
+ * @returns 输出：`undefined | IpFetchStatsStore` — 未配置目录时为 undefined
  */
 export function createIpFetchStatsStoreFromConfig(
   opts: FetchMetricsOptions = GeoClawConfig.get().getFetchMetricsOptions(),
@@ -61,9 +61,9 @@ export function createIpFetchStatsStoreFromConfig(
 }
 
 /**
- * 执行 seedIpsForHostname。
- * @param hostname - 输入：`string` — hostname 参数
- * @returns 输出：`undefined | IpFetchStatsSeedIp[]` — undefined | IpFetchStatsSeedIp[] 实例
+ * 从 HostPin YAML 预填某域名的 IP 地理种子。
+ * @param hostname - 输入：`string` — 请求主机名
+ * @returns 输出：`undefined | IpFetchStatsSeedIp[]` — 无对应 YAML 时为 undefined
  */
 function seedIpsForHostname(hostname: string): IpFetchStatsSeedIp[] | undefined {
   const cfg = GeoClawConfig.get();

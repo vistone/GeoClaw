@@ -1,117 +1,190 @@
-# GeoClaw 运行时配置（禁止在代码中硬编码可调参数）
-# 路径均相对于项目根目录，除非为绝对路径
+# GeoClaw 运行时配置（可调参数只写这里，不要在 src/ 硬编码）
+# 相对路径均相对于项目根目录；可用环境变量 GEOCLAW_CONFIG 指定其它文件
 
+# ---------- 日志 ----------
 log:
+  # 级别：debug | info | warn | error | silent（debug 会打各对象耗时）
   level: info
 
+# ---------- Rocktree API ----------
 rocktree:
+  # Planetoid / Bulk / Node 请求的根 URL（末尾不要多余路径）
   baseUrl: https://kh.google.com/rt/earth
 
+# ---------- 通用 HTTP 抓取 ----------
 fetch:
+  # 附加到每次请求的浏览器上下文头（模拟来自 Earth 网页）
   contextHeaders:
     Origin: https://earth.google.com
     Referer: https://earth.google.com/
+  # true：强制 Accept-Encoding: identity，避免 gzip 干扰原始 protobuf 字节
   forceIdentityEncoding: true
+  # true：每次请求打印传输 trace（profile、是否 H2、耗时等）
   logTransportTrace: false
-  # 热池/业务请求超时（毫秒）；超时不踢热连接，任务回队换 IP
+  # 热池/业务请求超时（毫秒）；超时不踢热连接，任务回队换 IP 再试；null=不限制
   timeoutMs: 2000
 
+# ---------- TLS / 浏览器指纹（node-wreq） ----------
 tls:
+  # 浏览器 TLS 指纹 profile 名（如 chrome_128）
   profile: chrome_128
+  # 指纹对应操作系统：linux | windows | macos 等
   platform: linux
+  # true：启用 HTTP/2 指纹模拟
   http2: true
+  # true：由 profile 自动填充常见浏览器请求头
   profileHeaders: true
 
+# ---------- 出站代理 ----------
 proxy:
+  # false：全程直连，忽略 url
   enabled: true
+  # 代理地址（socks5:// 或 http://）
   url: socks5://127.0.0.1:20170
+  # auto=仅 IPv6 走代理；always=全部走代理；never=从不走代理
   mode: auto
 
+# ---------- HostPin（按 YAML IP 列表直连，绕过系统 DNS） ----------
 hostPin:
+  # false：不启用 HostPin，走系统 DNS
   enabled: true
+  # 要 pin 的主机名（须与 ipsFile 内记录匹配）
   hostname: kh.google.com
+  # IP 列表 YAML（含 geo 字段时可画航线/统计地区）
   ipsFile: config/kh.google.com.yaml
+  # 按「域名.yaml」自动查找 HostPin 文件时的目录
   configDir: config
+  # 选用地址族：all | ipv4 | ipv6
   family: all
 
+# ---------- benchmark:kh-ips 脚本默认值 ----------
 benchmark:
+  # 并发探测数
   concurrency: 200
+  # 单次探测超时（毫秒）
   timeoutMs: 20000
+  # 结果输出目录
   outDir: benchmark
+  # 相对 rocktree.baseUrl 的探测路径（也作热池默认预热 URL）
   planetoidPath: PlanetoidMetadata
 
+# ---------- 热连接池（每 IP 一条可复用 HTTP/2） ----------
 warmPool:
+  # false：关闭热池，WebFetch 走冷路径（HostPin/系统 DNS）
   enabled: true
+  # 预热用 IP 列表；null=复用 hostPin.ipsFile
   ipsFile: null
+  # 预热请求路径；null=复用 benchmark.planetoidPath
   warmupPath: null
+  # node-wreq 连接池空闲超时；false=不额外限制
   poolIdleTimeout: false
   poolMaxIdlePerHost: 1
+  # 这些 HTTP 状态移出热池并重热
   deniedStatuses: [403, 429]
   coldPoolStatuses: [403, 429]
   successStatus: 200
   autoStartWarmup: true
-  # 首轮批量并发预热：同时最多 N 个 IP 在预热（非逐条串行）
-  initialConcurrency: 200
-  # 冷池/失败 IP 每轮重预热批次大小
-  reheatConcurrency: 50
+  # 唯一并发旋钮：首轮预热 / 重热 / 保活 / 下载任务共用（勿再拆一堆更小的上限）
+  concurrency: 200
+  # 后台重热轮询间隔（毫秒）
   reheatIntervalMs: 5000
-  reheatBackoffMs: 30000
-  deniedBackoffMs: 60000
+  # 失败后统一退避（毫秒）；0=尽快再试，不人为卡很久
+  backoffMs: 0
+  # true：无热连接时允许 HostPin 冷路径
   fallbackToHostPin: false
-  taskConcurrency: 50
+  # 单任务最大尝试次数；null=不限制
   maxTaskAttempts: null
-  # 统一空闲窗口：选路优先派给快过期热连接续命；空闲达 75% 窗口时轻量保活（0 关闭）
+  # 空闲窗口（毫秒）：用于保活续命；0=关闭保活
   idleExpireMs: 60000
-  keepAliveConcurrency: 20
 
+# ---------- 请求指标与 IP 统计 ----------
 fetchMetrics:
+  # false：不记录指标（地图/统计面板数据会空）
   enabled: true
+  # true：每次 attempt 打一条日志（很吵，调试用）
   logEachAttempt: false
+  # 周期性摘要日志间隔（毫秒）；0=不打摘要
   summaryIntervalMs: 30000
+  # 内存中保留的最近 attempt 条数（环形缓冲）
   maxRecentAttempts: 1000
+  # 内存中保留的最近完整请求条数
   maxRecentRequests: 500
+  # 内存中保留的最近飞行路线条数（供地图拉取）
   maxRecentFlightPaths: 500
-  # 按域名分文件的 IP 请求统计（常驻）：config/ip-stats/<hostname>.yaml
+  # IP 统计 YAML 目录：config/ip-stats/<hostname>.yaml；null=不落盘
   ipStatsDir: config/ip-stats
+  # 统计刷盘间隔（毫秒）；0=仅进程退出或显式 flush 时写
   ipStatsFlushIntervalMs: 5000
+  # true：启动时用 HostPin YAML 种子化全部 IP 行（便于显示全量 IP）
   ipStatsSeedFromHostPin: true
 
+# ---------- 飞行路线 origin / 目标解析 ----------
 fetchRoute:
+  # origin 来源：ipinfo=查本机出口 IP 坐标；manual=用下面 origin 字段
   originMode: ipinfo
+  # originMode=manual 时的客户端坐标；ipinfo 模式下忽略
   origin: null
+  # true：航线中插入代理节点（需 proxy.geo）；当前可视化默认关闭
+  includeProxyHop: false
+  # true：系统 DNS 路径下也用 ipinfo 解析目标 IP/域名坐标
   ipinfoForSystemDns: true
 
+# ---------- ipinfo.io ----------
 ipinfo:
+  # false：禁用 ipinfo（originMode=ipinfo 时将无法自动取出口坐标）
   enabled: true
-  # 勿把真实 token 提交进仓库；可用环境变量 IPINFO_TOKEN 覆盖
+  # API token；建议 null + 环境变量 IPINFO_TOKEN，勿把真实 token 提交进仓库
   token: null
+  # ipinfo API 根 URL
   baseUrl: https://ipinfo.io
+  # 查询结果内存缓存 TTL（毫秒）
   cacheTtlMs: 3600000
+  # 单次 ipinfo HTTP 超时（毫秒）
   timeoutMs: 5000
+  # true：查「本机出口」时也走 proxy.url（出口变成代理侧）
   originViaProxy: false
 
+# ---------- 飞行地图（npm run flight:map） ----------
 flightMap:
+  # HTTP/WS 监听地址
   host: 127.0.0.1
+  # 监听端口（浏览器打开 http://host:port）
   port: 8765
-  # Bing Maps 底图（Road / Aerial / AerialWithLabels）
+  # 备用 MapLibre style URL（tileProvider 不用时或调试用）
+  mapStyleUrl: https://demotiles.maplibre.org/style.json
+  # tileProvider=custom 时的栅格瓦片模板（含 {z}/{x}/{y}）
+  tileUrl: https://tile.openstreetmap.org/{z}/{x}/{y}.png
+  # 底图：bing=必应栅格；custom=使用上面 tileUrl
   tileProvider: bing
+  # Bing 图层：Road | Aerial | AerialWithLabels
   bingImagerySet: Road
-  # 可选；也可用环境变量 BING_MAPS_KEY
+  # Bing Maps Key；也可用环境变量 BING_MAPS_KEY；null=走公开瓦片回退
   bingMapsKey: null
+  # 「在 geojson.io 打开」按钮的基址
   geojsonIoUrl: https://geojson.io
+  # 前端轮询/状态刷新间隔（毫秒）
   pollIntervalMs: 3000
+  # true：服务启动后自动发一次演示请求（画出一条样例航线）
   demoFetchOnStart: true
+  # 演示请求 URL；null=自动用 rocktree + planetoidPath
   demoFetchUrl: null
-  # 弹道弧显示高度（地图拱高用，非真实 LEO）
+  # 地球半径 (km)，用于弹道弧/拱高计算（显示用，非精密大地测量）
   earthRadiusKm: 6371
+  # 航线显示用「轨道高度」下限 (km)，影响弧拱高度随机/分配区间
   leoAltitudeMinKm: 12
+  # 航线显示用「轨道高度」上限 (km)
   leoAltitudeMaxKm: 48
+  # 平面地图上对轨道拱高的夸张倍数（真实仰角太小，需放大才好看）
   orbitDisplayExaggeration: 2.5
-  # 请求脉冲：绘出 → 停留 → 淡出（不画满热池）
+  # 单条航线脉冲：绘制动画时长（毫秒）
   routeDrawMs: 1400
+  # 绘制完成后停留时长（毫秒）
   routeHoldMs: 500
+  # 停留后淡出时长（毫秒）
   routeFadeMs: 2800
-  # 高并发：轮询热池 IP 发请求，压前端脉冲绘制
+  # 压测并发：同时用多少热连接发请求（冲地图脉冲）
   stressConcurrency: 500
-  stressTotal: null
+  # 压测总请求数；null=按热池 IP 数与并发估算（约 max(hot*2, concurrency*2)）
+  stressTotal: 10000
+  # true：热池就绪后自动开跑一轮压测
   stressOnStart: false

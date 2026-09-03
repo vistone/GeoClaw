@@ -4,12 +4,9 @@ export class HotFetchNotOkError extends Error {
   readonly ip: string;
 
   /**
-   * 构造实例。
-   * @param status - 输入：`number` — status 参数
-   * @param ip - 输入：`string` — ip 参数
-   * @returns 输出：`HotFetchNotOkError` — HotFetchNotOkError 实例
+   * @param status - 输入：`number` — 非 200 的 HTTP 状态码
+   * @param ip - 输入：`string` — 本次请求使用的热连接 IP
    */
-
   constructor(status: number, ip: string) {
     super(`HTTP ${status} via hot IP ${ip}`);
     this.name = "HotFetchNotOkError";
@@ -23,12 +20,9 @@ export class HotFetchTransportError extends Error {
   readonly ip: string;
 
   /**
-   * 构造实例。
-   * @param ip - 输入：`string` — ip 参数
-   * @param cause - 输入：`unknown` — cause 参数
-   * @returns 输出：`HotFetchTransportError` — HotFetchTransportError 实例
+   * @param ip - 输入：`string` — 本次请求使用的热连接 IP
+   * @param cause - 输入：`unknown` — 底层传输错误原因
    */
-
   constructor(ip: string, cause: unknown) {
     super(cause instanceof Error ? cause.message : String(cause));
     this.name = "HotFetchTransportError";
@@ -43,11 +37,10 @@ export class HotFetchTimeoutError extends Error {
   readonly ip: string;
 
   /**
-   * 构造实例。
-   * @param ip - 输入：`string` — ip 参数
-   * @param cause - 输入：`unknown` — cause 参数
-   * @returns 输出：`HotFetchTimeoutError` — HotFetchTimeoutError 实例
-   */constructor(ip: string, cause?: unknown) {
+   * @param ip - 输入：`string` — 超时的热连接 IP
+   * @param cause - 输入：`unknown` — 可选超时细节
+   */
+  constructor(ip: string, cause?: unknown) {
     const detail = cause instanceof Error ? cause.message : cause != null ? String(cause) : "timeout";
     super(`timeout via hot IP ${ip}: ${detail}`);
     this.name = "HotFetchTimeoutError";
@@ -58,10 +51,8 @@ export class HotFetchTimeoutError extends Error {
 /** 当前无可用热连接（任务应回队等待后台重加热） */
 export class HotFetchNoHotIpError extends Error {
   /**
-   * 构造实例。
-   * @returns 输出：`HotFetchNoHotIpError` — HotFetchNoHotIpError 实例
+   * 无可用热连接时构造。
    */
-
   constructor() {
     super("HotConnectionPool: no hot connections available");
     this.name = "HotFetchNoHotIpError";
@@ -71,12 +62,9 @@ export class HotFetchNoHotIpError extends Error {
 /** 任务超过最大尝试次数 */
 export class FetchTaskMaxAttemptsError extends Error {
   /**
-   * 构造实例。
-   * @param url - 输入：`string` — 完整 HTTP URL
-   * @param attempts - 输入：`number` — attempts 参数
-   * @returns 输出：`FetchTaskMaxAttemptsError` — FetchTaskMaxAttemptsError 实例
+   * @param url - 输入：`string` — 超限的完整 HTTP URL
+   * @param attempts - 输入：`number` — 已达上限的尝试次数
    */
-
   constructor(url: string, attempts: number) {
     super(`FetchTaskPool: max attempts (${attempts}) exceeded for ${url}`);
     this.name = "FetchTaskMaxAttemptsError";
@@ -84,9 +72,9 @@ export class FetchTaskMaxAttemptsError extends Error {
 }
 
 /**
- * 判断 FetchRequeueError。
- * @param err - 输入：`unknown` — 错误对象
- * @returns 输出：`boolean` — 条件成立返回 true，否则 false
+ * 判断错误是否应触发任务回队而非最终失败。
+ * @param err - 输入：`unknown` — catch 到的错误对象
+ * @returns 输出：`boolean` — 属于热连接可回队错误则 true
  */
 export function isFetchRequeueError(err: unknown): boolean {
   return (

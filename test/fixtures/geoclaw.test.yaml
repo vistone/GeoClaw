@@ -46,14 +46,12 @@ warmPool:
   coldPoolStatuses: [403, 429]
   successStatus: 200
   autoStartWarmup: false
-  initialConcurrency: 2
-  reheatConcurrency: 1
+  concurrency: 2
   reheatIntervalMs: 5000
-  reheatBackoffMs: 1000
-  deniedBackoffMs: 2000
+  backoffMs: 0
   fallbackToHostPin: true
-  taskConcurrency: 2
   maxTaskAttempts: null
+  idleExpireMs: 60000
 
 fetchMetrics:
   enabled: true
@@ -88,13 +86,22 @@ ipinfo:
 flightMap:
   host: 127.0.0.1
   port: 8765
+  mapStyleUrl: https://demotiles.maplibre.org/style.json
+  tileUrl: https://tile.openstreetmap.org/{z}/{x}/{y}.png
   tileProvider: bing
   bingImagerySet: Road
   bingMapsKey: null
   geojsonIoUrl: https://geojson.io
-  leoAltitudeMinKm: 12
-  leoAltitudeMaxKm: 48
-  orbitDisplayExaggeration: 2.5
   pollIntervalMs: 5000
   demoFetchOnStart: false
   demoFetchUrl: null
+  earthRadiusKm: 6371
+  leoAltitudeMinKm: 12
+  leoAltitudeMaxKm: 48
+  orbitDisplayExaggeration: 2.5
+  routeDrawMs: 1400
+  routeHoldMs: 500
+  routeFadeMs: 2800
+  stressConcurrency: 5
+  stressTotal: null
+  stressOnStart: false

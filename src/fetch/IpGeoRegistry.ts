@@ -1,3 +1,4 @@
+import { Logger } from "../core/Logger.js";
 import type { HostPinRecord } from "./HostPinPool.js";
 
 /** IP 地理信息（来自 kh.google.com.yaml） */
@@ -15,14 +16,13 @@ export type IpGeoInfo = {
  * IP → 地区查询表；预热/下载统计时解析 IP 所属区域。
  */
 export class IpGeoRegistry {
+  private static readonly logger = new Logger("IpGeoRegistry");
   private readonly byIp = new Map<string, IpGeoInfo>();
 
   /**
-   * 构造实例。
-   * @param records - 输入：`HostPinRecord[]` — records 参数
-   * @returns 输出：`IpGeoRegistry` — IpGeoRegistry 实例
+   * 由 HostPin 记录构建 IP 地理索引。
+   * @param records - 输入：`HostPinRecord[]` — HostPin YAML 解析出的 IP 记录
    */
-
   constructor(records: readonly HostPinRecord[]) {
     for (const record of records) {
       this.byIp.set(record.ip, {
@@ -38,28 +38,30 @@ export class IpGeoRegistry {
   }
 
   /**
-   * 执行 lookup。
-   * @param ip - 输入：`string` — ip 参数
-   * @returns 输出：`undefined | IpGeoInfo` — undefined | IpGeoInfo 实例
+   * 按 IP 查询地理信息。
+   * @param ip - 输入：`string` — 待查询的 IP 地址
+   * @returns 输出：`undefined | IpGeoInfo` — 命中则返回城市、国家、loc
    */
-
   lookup(ip: string): IpGeoInfo | undefined {
-    return this.byIp.get(ip);
+    return IpGeoRegistry.logger.measureSync(
+      "lookup",
+      () => this.byIp.get(ip),
+      { ip },
+    );
   }
 
   /**
-   * 执行 entries。
-   * @returns 输出：`IterableIterator` — IterableIterator 实例
+   * 迭代全部 IP 与地理信息条目。
+   * @returns 输出：`IterableIterator<[string, IpGeoInfo]>` — [ip, info] 迭代器
    */
   entries(): IterableIterator<[string, IpGeoInfo]> {
     return this.byIp.entries();
   }
 
   /**
-   * 执行 size。
-   * @returns 输出：`number` — 数值结果
+   * 返回已索引的 IP 数量。
+   * @returns 输出：`number` — 表中 IP 条数
    */
-
   size(): number {
     return this.byIp.size;
   }

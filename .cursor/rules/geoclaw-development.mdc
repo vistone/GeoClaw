@@ -47,6 +47,7 @@ alwaysApply: true
 ## AI 辅助开发
 
 - 见 `DEVELOPMENT.md` §10：**全局思考、最小变更、禁止破坏既有功能**。
+- **§10.8**：未获用户明确要求，禁止主动加限制参数 / 限流门禁。
 - 完成前必须：`typecheck` + `jsdoc:check` + `test` 全通过。
 
 ## 调试与真实数据测试

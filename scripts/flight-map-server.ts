@@ -250,11 +250,11 @@ function buildStatusPayload() {
   };
 }
 
-/** 管理界面：当前请求域名下的每 IP 统计（含坐标便于点击定位）；topN≤0 表示全部 */
-function buildIpStatsUiPayload(hostname: string, topN = 0) {
+/** 管理界面：当前请求域名下的每 IP 统计；topN≤0 表示全部；includeRows=false 只返回汇总 */
+function buildIpStatsUiPayload(hostname: string, topN = 0, includeRows = true) {
   const store = webFetch.getFetchMetrics()?.getIpStatsStore();
   if (!store) return null;
-  const summary = store.summarizeForUi(hostname, topN);
+  const summary = store.summarizeForUi(hostname, topN, includeRows);
   if (!summary) return null;
   return {
     ...summary,
@@ -362,16 +362,13 @@ function sendIpStatsToClient(ws: WebSocket, forceFull = false): void {
   if (!forceFull && !state.needFull && rev === state.revision) return;
 
   if (forceFull || state.needFull) {
-    // WS 全量仅摘要；limit=0 时也不在服务端组装三千行
-    const payload = buildIpStatsUiPayload(state.hostname, state.limit > 0 ? state.limit : 1);
+    // WS 全量只推摘要；行数据由前端 HTTP → IndexedDB 灌入（includeRows=false 避免组装全表）
+    const payload = buildIpStatsUiPayload(state.hostname, 0, false);
     if (!payload) return;
-    // 全量只推摘要，行数据由前端 HTTP → IndexedDB 灌入，避免 WS 卡死
     const allSigs = store.collectChangedActive(state.hostname, new Map());
     state.lastSent.clear();
     if (allSigs) {
       for (const r of allSigs.changed) state.lastSent.set(r.ip, r.sig);
-    } else {
-      for (const r of payload.top) state.lastSent.set(r.ip, rowSig(r));
     }
     state.revision = rev;
     state.needFull = false;
@@ -403,10 +400,8 @@ function sendIpStatsToClient(ws: WebSocket, forceFull = false): void {
     return;
   }
 
-  // 单帧增量上限，未发送的下次继续推（不写入 lastSent）
-  const MAX_DELTA = 40;
-  const sorted = [...diff.changed].sort((a, b) => b.requests - a.requests);
-  const changed = sorted.slice(0, MAX_DELTA);
+  // 增量一次推完变更，不做单帧条数封顶
+  const changed = [...diff.changed].sort((a, b) => b.requests - a.requests);
   for (const r of changed) state.lastSent.set(r.ip, r.sig);
   state.revision = rev;
 
@@ -1114,16 +1109,15 @@ server.listen(mapCfg.port, mapCfg.host, () => {
 
     if (mapCfg.stressOnStart) {
       const pool = webFetch.getHotConnectionPool();
+      // 有热连接即可开压测，不设「至少 N 条」门槛
       for (let i = 0; i < 90; i++) {
-        if (pool && pool.getHotCount() >= Math.min(20, pool.getStats().total || 20)) break;
-        if (pool && pool.getHotCount() > 0 && i >= 15) break;
+        if (pool && pool.getHotCount() > 0) break;
         await new Promise((r) => setTimeout(r, 1000));
       }
       if (!pool || pool.getHotCount() === 0) {
         console.error("压测跳过: 热池仍无存活 IP");
         return;
       }
-      // 多等一会让热池更满，再轮询压测
       await new Promise((r) => setTimeout(r, 3000));
       void runStress({});
     }

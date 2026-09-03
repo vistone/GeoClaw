@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { Logger } from "../core/Logger.js";
-import type { IpGeoInfo, IpGeoRegistry } from "./IpGeoRegistry.js";
+import type { IpGeoRegistry } from "./IpGeoRegistry.js";
 import type { IpFetchStatsStore } from "./IpFetchStatsStore.js";
 import type { FetchFlightPath } from "./FetchFlightPath.js";
 
@@ -115,11 +115,10 @@ export class FetchMetrics {
   private readonly active = new Map<string, ActiveRequest>();
 
   /**
-   * 构造实例。
-   * @param options - 输入：`FetchMetricsOptions` — 配置选项
-   * @param geo - 输入：`IpGeoRegistry` — geo 参数
-   * @param ipStats - 输入：`undefined | IpFetchStatsStore` — ipStats 参数
-   * @returns 输出：`FetchMetrics` — FetchMetrics 实例
+   * 绑定地理表与可选 IP 统计存储初始化。
+   * @param options - 输入：`FetchMetricsOptions` — 汇总间隔与环形缓冲上限
+   * @param geo - 输入：`IpGeoRegistry` — IP → 地区查询表
+   * @param ipStats - 输入：`undefined | IpFetchStatsStore` — 按域名落盘的 IP 统计
    */
   constructor(
     options: FetchMetricsOptions,
@@ -135,44 +134,47 @@ export class FetchMetrics {
   }
 
   /**
-   * 创建 RequestId。
-   * @returns 输出：`string` — 字符串结果
+   * 生成新的业务请求 ID。
+   * @returns 输出：`string` — UUID
    */
-
   createRequestId(): string {
     return randomUUID();
   }
 
   /**
-   * 执行 onRequestStart。
-   * @param requestId - 输入：`string` — requestId 参数
+   * 标记业务请求开始并计入 inFlight。
+   * @param requestId - 输入：`string` — 业务请求 ID
    * @param url - 输入：`string` — 完整 HTTP URL
    * @returns 输出：无（`void`）
    */
-
   onRequestStart(requestId: string, url: string): void {
-    this.submitted++;
-    this.inFlight++;
-    this.active.set(requestId, {
-      url,
-      startedAt: Date.now(),
-      attempts: 0,
-      ipsUsed: [],
-    });
+    FetchMetrics.logger.measureSync(
+      "onRequestStart",
+      () => {
+        this.submitted++;
+        this.inFlight++;
+        this.active.set(requestId, {
+          url,
+          startedAt: Date.now(),
+          attempts: 0,
+          ipsUsed: [],
+        });
+      },
+      { requestId, url },
+    );
   }
 
   /**
-   * 执行 onAttempt。
-   * @param requestId - 输入：`string` — requestId 参数
+   * 记录单次 fetch 尝试结果并更新分桶计数。
+   * @param requestId - 输入：`string` — 业务请求 ID
    * @param url - 输入：`string` — 完整 HTTP URL
-   * @param attempt - 输入：`number` — attempt 参数
-   * @param ip - 输入：`undefined | string` — ip 参数
-   * @param outcome - 输入：`object` — outcome 参数
-   * @param durationMs - 输入：`number` — durationMs 参数
-   * @param bytes - 输入：`undefined | number` — bytes 参数
+   * @param attempt - 输入：`number` — 当前尝试序号（从 1 起）
+   * @param ip - 输入：`undefined | string` — 本次使用的连接 IP
+   * @param outcome - 输入：`FetchAttemptOutcome` — 成功/HTTP 错/传输错/无热 IP
+   * @param durationMs - 输入：`number` — 本次尝试耗时毫秒
+   * @param bytes - 输入：`undefined | number` — 响应体字节数
    * @returns 输出：无（`void`）
    */
-
   onAttempt(
     requestId: string,
     url: string,
@@ -182,198 +184,249 @@ export class FetchMetrics {
     durationMs: number,
     bytes?: number,
   ): void {
-    this.totalAttempts++;
-    const active = this.active.get(requestId);
-    if (active) {
-      active.attempts = attempt;
-      if (ip && !active.ipsUsed.includes(ip)) {
-        active.ipsUsed.push(ip);
-      }
-    }
+    FetchMetrics.logger.measureSync(
+      "onAttempt",
+      () => {
+        this.totalAttempts++;
+        const active = this.active.get(requestId);
+        if (active) {
+          active.attempts = attempt;
+          if (ip && !active.ipsUsed.includes(ip)) {
+            active.ipsUsed.push(ip);
+          }
+        }
 
-    const statusKey = outcomeStatusKey(outcome);
-    this.bumpMap(this.byStatus, statusKey);
+        const statusKey = outcomeStatusKey(outcome);
+        this.bumpMap(this.byStatus, statusKey);
 
-    const geo = ip ? this.geo.lookup(ip) : undefined;
-    if (ip) {
-      this.bumpCounter(this.byIp, ip, outcome.kind === "success", durationMs, bytes);
-      const hostname = hostnameFromUrl(url);
-      if (hostname) {
-        this.ipStats?.recordAttempt({
-          hostname,
+        const geo = ip ? this.geo.lookup(ip) : undefined;
+        if (ip) {
+          this.bumpCounter(this.byIp, ip, outcome.kind === "success", durationMs, bytes);
+          const hostname = hostnameFromUrl(url);
+          if (hostname) {
+            this.ipStats?.recordAttempt({
+              hostname,
+              ip,
+              success: outcome.kind === "success",
+              durationMs,
+              bytes,
+              city: geo?.city,
+              region: geo?.region,
+              country: geo?.country,
+              loc: geo?.loc,
+            });
+          }
+        }
+        if (geo?.country) {
+          this.bumpCounter(this.byCountry, geo.country, outcome.kind === "success", durationMs);
+        }
+        if (geo?.region) {
+          this.bumpCounter(this.byRegion, geo.region, outcome.kind === "success", durationMs);
+        }
+
+        const record: FetchAttemptRecord = {
+          requestId,
+          url,
+          attempt,
           ip,
-          success: outcome.kind === "success",
+          outcome: outcome.kind,
+          httpStatus: outcome.kind === "success" || outcome.kind === "http_error" ? outcome.httpStatus : undefined,
           durationMs,
           bytes,
           city: geo?.city,
           region: geo?.region,
           country: geo?.country,
-          loc: geo?.loc,
-        });
-      }
-    }
-    if (geo?.country) {
-      this.bumpCounter(this.byCountry, geo.country, outcome.kind === "success", durationMs);
-    }
-    if (geo?.region) {
-      this.bumpCounter(this.byRegion, geo.region, outcome.kind === "success", durationMs);
-    }
+          at: Date.now(),
+        };
+        this.pushRecent(this.recentAttempts, record, this.options.maxRecentAttempts);
 
-    const record: FetchAttemptRecord = {
-      requestId,
-      url,
-      attempt,
-      ip,
-      outcome: outcome.kind,
-      httpStatus: outcome.kind === "success" || outcome.kind === "http_error" ? outcome.httpStatus : undefined,
-      durationMs,
-      bytes,
-      city: geo?.city,
-      region: geo?.region,
-      country: geo?.country,
-      at: Date.now(),
-    };
-    this.pushRecent(this.recentAttempts, record, this.options.maxRecentAttempts);
-
-    if (this.options.logEachAttempt) {
-      FetchMetrics.logger.info("fetch 尝试", record);
-    }
+        if (this.options.logEachAttempt) {
+          FetchMetrics.logger.info("fetch 尝试", record);
+        }
+      },
+      { requestId, url, attempt, ip, outcome: outcome.kind, durationMs },
+    );
   }
 
   /**
-   * 执行 onRequestSuccess。
-   * @param requestId - 输入：`string` — requestId 参数
-   * @param ip - 输入：`string` — ip 参数
-   * @param httpStatus - 输入：`number` — httpStatus 参数
-   * @param bytes - 输入：`number` — bytes 参数
+   * 标记业务请求成功并写入最终记录。
+   * @param requestId - 输入：`string` — 业务请求 ID
+   * @param ip - 输入：`string` — 最终成功使用的 IP
+   * @param httpStatus - 输入：`number` — 最终 HTTP 状态码
+   * @param bytes - 输入：`number` — 响应体字节数
    * @returns 输出：无（`void`）
    */
-
   onRequestSuccess(requestId: string, ip: string, httpStatus: number, bytes: number): void {
-    this.inFlight = Math.max(0, this.inFlight - 1);
-    this.succeeded++;
-    this.finishRequest(requestId, "success", ip, httpStatus, bytes);
+    FetchMetrics.logger.measureSync(
+      "onRequestSuccess",
+      () => {
+        this.inFlight = Math.max(0, this.inFlight - 1);
+        this.succeeded++;
+        this.finishRequest(requestId, "success", ip, httpStatus, bytes);
+      },
+      { requestId, ip, httpStatus, bytes },
+    );
   }
 
   /**
-   * 执行 onRequestFailed。
-   * @param requestId - 输入：`string` — requestId 参数
-   * @param lastIp - 输入：`undefined | string` — lastIp 参数
-   * @param lastStatus - 输入：`undefined | number` — lastStatus 参数
+   * 标记业务请求最终失败并写入记录。
+   * @param requestId - 输入：`string` — 业务请求 ID
+   * @param lastIp - 输入：`undefined | string` — 最后一次尝试的 IP
+   * @param lastStatus - 输入：`undefined | number` — 最后一次 HTTP 状态码
    * @returns 输出：无（`void`）
    */
-
   onRequestFailed(requestId: string, lastIp?: string, lastStatus?: number): void {
-    this.inFlight = Math.max(0, this.inFlight - 1);
-    this.failed++;
-    this.finishRequest(requestId, "failed", lastIp, lastStatus);
+    FetchMetrics.logger.measureSync(
+      "onRequestFailed",
+      () => {
+        this.inFlight = Math.max(0, this.inFlight - 1);
+        this.failed++;
+        this.finishRequest(requestId, "failed", lastIp, lastStatus);
+      },
+      { requestId, lastIp, lastStatus },
+    );
   }
 
   /**
-   * 执行 addIpBytes。
-   * @param ip - 输入：`string` — ip 参数
-   * @param bytes - 输入：`number` — bytes 参数
-   * @param hostname - 输入：`undefined | string` — hostname 参数
+   * 向内存与落盘 IP 桶追加响应字节。
+   * @param ip - 输入：`string` — 连接 IP
+   * @param bytes - 输入：`number` — 追加字节数
+   * @param hostname - 输入：`undefined | string` — 请求域名；有则同步落盘统计
    * @returns 输出：无（`void`）
    */
   addIpBytes(ip: string, bytes: number, hostname?: string): void {
-    if (!ip || bytes <= 0) return;
-    const bucket = this.byIp.get(ip);
-    if (bucket) {
-      bucket.totalBytes = (bucket.totalBytes ?? 0) + bytes;
-      this.byIp.set(ip, bucket);
-    }
-    if (hostname) {
-      this.ipStats?.addBytes(hostname, ip, bytes);
-    }
+    FetchMetrics.logger.measureSync(
+      "addIpBytes",
+      () => {
+        if (!ip || bytes <= 0) return;
+        const bucket = this.byIp.get(ip);
+        if (bucket) {
+          bucket.totalBytes = (bucket.totalBytes ?? 0) + bytes;
+          this.byIp.set(ip, bucket);
+        }
+        if (hostname) {
+          this.ipStats?.addBytes(hostname, ip, bytes);
+        }
+      },
+      { ip, bytes, hostname },
+    );
   }
 
   /**
-   * 获取 IpStatsStore。
-   * @returns 输出：`undefined | IpFetchStatsStore` — undefined | IpFetchStatsStore 实例
+   * 返回可选的 IP 统计落盘存储。
+   * @returns 输出：`undefined | IpFetchStatsStore` — 未配置目录时为 undefined
    */
   getIpStatsStore(): IpFetchStatsStore | undefined {
     return this.ipStats;
   }
 
   /**
-   * 执行 flushIpStats。
+   * 将脏 IP 统计刷入 YAML。
    * @returns 输出：无（`void`）
    */
   flushIpStats(): void {
-    this.ipStats?.flush();
+    FetchMetrics.logger.measureSync(
+      "flushIpStats",
+      () => {
+        this.ipStats?.flush();
+      },
+      { hasStore: Boolean(this.ipStats) },
+    );
   }
 
   /**
-   * 执行 resetIpStats。
-   * @param hostname - 输入：`string` — hostname 参数
-   * @returns 输出：`number` — 数值结果
+   * 重置某域名下全部 IP 计数并刷盘。
+   * @param hostname - 输入：`string` — 请求主机名
+   * @returns 输出：`number` — 被重置的 IP 条数
    */
   resetIpStats(hostname: string): number {
-    return this.ipStats?.resetHostname(hostname) ?? 0;
+    return FetchMetrics.logger.measureSync(
+      "resetIpStats",
+      () => this.ipStats?.resetHostname(hostname) ?? 0,
+      { hostname },
+    );
   }
 
   /**
-   * 执行 onFlightPath。
-   * @param path - 输入：`FetchFlightPath` — 八分体路径
+   * 将飞行路径推入近期环形缓冲。
+   * @param path - 输入：`FetchFlightPath` — 单次请求的飞行路径
    * @returns 输出：无（`void`）
    */
   onFlightPath(path: FetchFlightPath): void {
-    this.pushRecent(this.recentFlightPaths, path, this.options.maxRecentFlightPaths);
+    FetchMetrics.logger.measureSync(
+      "onFlightPath",
+      () => {
+        this.pushRecent(this.recentFlightPaths, path, this.options.maxRecentFlightPaths);
+      },
+      { requestId: path.requestId, waypoints: path.waypoints.length },
+    );
   }
 
   /**
-   * 获取 Snapshot。
-   * @returns 输出：`FetchMetricsSnapshot` — FetchMetricsSnapshot 实例
+   * 导出当前计数与近期记录快照。
+   * @returns 输出：`FetchMetricsSnapshot` — 字段见 export type FetchMetricsSnapshot
    */
-
   getSnapshot(): FetchMetricsSnapshot {
-    return {
-      submitted: this.submitted,
-      inFlight: this.inFlight,
-      succeeded: this.succeeded,
-      failed: this.failed,
-      totalAttempts: this.totalAttempts,
-      byStatus: mapToRecord(this.byStatus),
-      byIp: mapIpStats(this.byIp),
-      byCountry: mapToRecordBuckets(this.byCountry),
-      byRegion: mapToRecordBuckets(this.byRegion),
-      recentAttempts: [...this.recentAttempts],
-      recentRequests: [...this.recentRequests],
-      recentFlightPaths: [...this.recentFlightPaths],
-    };
+    return FetchMetrics.logger.measureSync(
+      "getSnapshot",
+      () => ({
+        submitted: this.submitted,
+        inFlight: this.inFlight,
+        succeeded: this.succeeded,
+        failed: this.failed,
+        totalAttempts: this.totalAttempts,
+        byStatus: mapToRecord(this.byStatus),
+        byIp: mapIpStats(this.byIp),
+        byCountry: mapToRecordBuckets(this.byCountry),
+        byRegion: mapToRecordBuckets(this.byRegion),
+        recentAttempts: [...this.recentAttempts],
+        recentRequests: [...this.recentRequests],
+        recentFlightPaths: [...this.recentFlightPaths],
+      }),
+      { submitted: this.submitted, inFlight: this.inFlight },
+    );
   }
 
   /**
-   * 执行 logSummary。
+   * 将当前快照摘要打到 INFO 日志。
    * @returns 输出：无（`void`）
    */
-
   logSummary(): void {
-    const s = this.getSnapshot();
-    FetchMetrics.logger.info("fetch 指标汇总", {
-      submitted: s.submitted,
-      inFlight: s.inFlight,
-      succeeded: s.succeeded,
-      failed: s.failed,
-      totalAttempts: s.totalAttempts,
-      byStatus: s.byStatus,
-      topCountries: topBuckets(s.byCountry, 5),
-      topRegions: topBuckets(s.byRegion, 5),
-    });
+    FetchMetrics.logger.measureSync(
+      "logSummary",
+      () => {
+        const s = this.getSnapshot();
+        FetchMetrics.logger.info("fetch 指标汇总", {
+          submitted: s.submitted,
+          inFlight: s.inFlight,
+          succeeded: s.succeeded,
+          failed: s.failed,
+          totalAttempts: s.totalAttempts,
+          byStatus: s.byStatus,
+          byCountry: s.byCountry,
+          byRegion: s.byRegion,
+        });
+      },
+      { submitted: this.submitted },
+    );
   }
 
   /**
-   * 执行 close。
+   * 停止汇总定时器并关闭 IP 统计存储。
    * @returns 输出：无（`void`）
    */
-
   close(): void {
-    if (this.summaryTimer) {
-      clearInterval(this.summaryTimer);
-      this.summaryTimer = undefined;
-    }
-    this.ipStats?.close();
+    FetchMetrics.logger.measureSync(
+      "close",
+      () => {
+        if (this.summaryTimer) {
+          clearInterval(this.summaryTimer);
+          this.summaryTimer = undefined;
+        }
+        this.ipStats?.close();
+      },
+      { hadTimer: Boolean(this.summaryTimer) },
+    );
   }
 
   /**
@@ -384,7 +437,6 @@ export class FetchMetrics {
    * @param bytes - 输入：`number | undefined` — 响应字节
    * @returns 输出：无（`void`）
    */
-
   private finishRequest(
     requestId: string,
     outcome: "success" | "failed",
@@ -417,7 +469,6 @@ export class FetchMetrics {
    * @param key - 输入：`string` — 键
    * @returns 输出：无（`void`）
    */
-
   private bumpMap(map: Map<string, number>, key: string): void {
     map.set(key, (map.get(key) ?? 0) + 1);
   }
@@ -429,7 +480,6 @@ export class FetchMetrics {
    * @param durationMs - 输入：`number` — 耗时
    * @returns 输出：无（`void`）
    */
-
   private bumpCounter(
     map: Map<string, FetchCounterBucket>,
     key: string,
@@ -463,7 +513,6 @@ export class FetchMetrics {
    * @param max - 输入：`number` — 上限
    * @returns 输出：无（`void`）
    */
-
   private pushRecent<T>(list: T[], item: T, max: number): void {
     list.push(item);
     while (list.length > max) {
@@ -473,9 +522,9 @@ export class FetchMetrics {
 }
 
 /**
- * 执行 outcomeStatusKey。
- * @param outcome - 输入：`object` — outcome 参数
- * @returns 输出：`string` — 字符串结果
+ * 将尝试结果映射为 byStatus 键。
+ * @param outcome - 输入：`FetchAttemptOutcome` — 单次尝试结果
+ * @returns 输出：`string` — HTTP 状态码字符串或 transport/no_hot_ip
  */
 function outcomeStatusKey(outcome: FetchAttemptOutcome): string {
   switch (outcome.kind) {
@@ -491,19 +540,20 @@ function outcomeStatusKey(outcome: FetchAttemptOutcome): string {
 }
 
 /**
- * 执行 mapToRecord。
- * @param map - 输入：`Map` — map 参数
- * @returns 输出：`Record<string, number>` — Record<string, number> 实例
+ * 将计数 Map 转为普通对象。
+ * @param map - 输入：`Map<string, number>` — 状态码或标签计数
+ * @returns 输出：`Record<string, number>` — 可 JSON 序列化的计数表
  */
 function mapToRecord(map: Map<string, number>): Record<string, number> {
   return Object.fromEntries(map.entries());
 }
 
 /**
- * 执行 hostnameFromUrl。
+ * 从 URL 提取小写主机名。
  * @param url - 输入：`string` — 完整 HTTP URL
- * @returns 输出：`string` — 字符串结果
- */function hostnameFromUrl(url: string): string {
+ * @returns 输出：`string` — 主机名；非法 URL 为空串
+ */
+function hostnameFromUrl(url: string): string {
   try {
     return new URL(url).hostname.toLowerCase();
   } catch {
@@ -512,9 +562,9 @@ function mapToRecord(map: Map<string, number>): Record<string, number> {
 }
 
 /**
- * 执行 mapToRecordBuckets。
- * @param map - 输入：`Map` — map 参数
- * @returns 输出：`Record<string, FetchCounterBucket>` — Record<string, FetchCounterBucket> 实例
+ * 将桶 Map 转为普通对象。
+ * @param map - 输入：`Map<string, FetchCounterBucket>` — 国家/地区桶
+ * @returns 输出：`Record<string, FetchCounterBucket>` — 可序列化桶表
  */
 function mapToRecordBuckets(
   map: Map<string, FetchCounterBucket>,
@@ -523,9 +573,9 @@ function mapToRecordBuckets(
 }
 
 /**
- * 执行 mapIpStats。
- * @param map - 输入：`Map` — map 参数
- * @returns 输出：`object` — object 实例
+ * 为 IP 桶附加平均耗时字段。
+ * @param map - 输入：`Map<string, FetchCounterBucket>` — 按 IP 聚合的桶
+ * @returns 输出：`Record<string, FetchCounterBucket & { avgDurationMs: number }>` — 含均值的 IP 表
  */
 function mapIpStats(
   map: Map<string, FetchCounterBucket>,
@@ -540,16 +590,3 @@ function mapIpStats(
   return out;
 }
 
-/**
- * 执行 topBuckets。
- * @param buckets - 输入：`Record<string, FetchCounterBucket>` — buckets 参数
- * @param n - 输入：`number` — n 参数
- * @returns 输出：`Record<string, FetchCounterBucket>` — Record<string, FetchCounterBucket> 实例
- */
-function topBuckets(
-  buckets: Record<string, FetchCounterBucket>,
-  n: number,
-): Record<string, FetchCounterBucket> {
-  const sorted = Object.entries(buckets).sort((a, b) => b[1].attempts - a[1].attempts);
-  return Object.fromEntries(sorted.slice(0, n));
-}

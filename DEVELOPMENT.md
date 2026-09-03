@@ -106,8 +106,20 @@ flowchart BT
 | 文件 | 职责 | 输入 → 输出 | 不做 |
 |------|------|-------------|------|
 | `HostPinPool.ts` | 从 YAML 加载 IP 并轮询 `dns.hosts` 直连 | hostname + YAML → 单 IP pin | TLS 握手、HTTP 请求 |
+| `HostPinRegistry.ts` | 按 URL 主机名解析对应 HostPin YAML | URL → HostPinPool / 系统 DNS | 发请求 |
 | `TlsFingerprintCodec.ts` | 解析 node-wreq TLS 浏览器 profile 并合并附加请求头 | profile / context / overrides → browser + Headers | 原生 TLS 握手（由 node-wreq 负责） |
 | `WebFetch.ts` | 带 TLS 指纹的 GET 字节拉取（默认 node-wreq） | URL + header 覆盖 → Uint8Array | Rocktree 业务、Bulk 解析 |
+| `HotConnectionPool.ts` | 每 IP 一条 HTTP/2 热连接：预热、保活、下载、踢池 | IP 列表 + warmupUrl → 热连接 fetch | 业务 protobuf 解析 |
+| `HotIpPicker.ts` | 热池公平选路（assignCount 均摊） | 候选列表 → IP | 连接管理 |
+| `ColdConnectionPool.ts` | 403/429 等 IP 暂存，禁止下载直至预热成功 | status + IP → 冷池状态 | HTTP |
+| `FetchTaskPool.ts` | 非阻塞任务池：失败回队、超时换 IP | URL 任务 → 最终响应 | 选路算法细节 |
+| `FetchMetrics.ts` / `IpFetchStatsStore.ts` | 请求指标与按域名 IP 统计落盘 | attempt 事件 → 快照 / YAML | 地图渲染 |
+| `IpGeoRegistry.ts` | IP → city/region/country 查表 | HostPin 记录 → IpGeoInfo | 网络 |
+| `IpInfoClient.ts` / `FetchRouteResolver.ts` | ipinfo 查出口/目标坐标并解析航线 origin | token + IP → 坐标 / HostPinRecord | 地图绘制 |
+| `FetchFlightPath.ts` | 飞行路线纯函数：航点、大圆/弹道弧、GeoJSON（无状态多 export） | 请求元数据 → FetchFlightPath / GeoJSON | HTTP |
+| `FetchErrors.ts` | fetch 层 Error 子类聚合（允许同文件多 Error） | 构造参数 → Error | 业务逻辑 |
+| `FetchTypes.ts` | 代理模式等共享类型与 `resolveProxyUrl` | mode + URL → 代理 URL | 连接池 |
+| `createFetchMetricsFromConfig.ts` | 从 GeoClawConfig 装配指标/地理/统计 | — → 已配置实例 | 业务算法 |
 
 **独立运行**：`webFetch.getBytes(url)` 即可；指纹与 header 通过构造选项或单次 `getOptions.headers` 配置。
 
@@ -148,6 +160,10 @@ flowchart BT
 | `tls.*` | node-wreq browser profile |
 | `proxy.*` | SOCKS5/HTTP 代理 URL 与 `auto/always/never` |
 | `hostPin.*` | HostPin 域名、IP 列表 YAML、地址族 |
+| `warmPool.*` | 热/冷池并发、空闲超时、任务池 |
+| `fetchMetrics.*` | 指标缓冲与 IP 统计落盘 |
+| `fetchRoute.*` / `ipinfo.*` | 航线 origin 与 ipinfo |
+| `flightMap.*` | 飞行地图服务与弧显示参数 |
 | `benchmark.*` | `benchmark:kh-ips` 脚本默认值 |
 
 - 代码通过 `GeoClawConfig.get()` 读取；构造选项 **仅用于测试注入或单次覆盖**，不得作为「第二套默认配置」。
@@ -301,7 +317,9 @@ CLI 从 TypeScript 类型推断 `@param` / `@returns` 的类型名；生成后�
 - `context` 放 **真实输入关键字段**（path、flags、url、字节长度），禁止空对象
 - 非 DEBUG 级别 **零额外开销**（直接执行 fn，不计时）
 - 禁止手写 `console.time` / `Date.now` 分散计时；统一走 Logger
-- 新增类必须：`private static readonly logger = new Logger("ClassName")`，方法内用 `ClassName.logger`；所有 public 方法 measure 包裹
+- 新增类必须：`private static readonly logger = new Logger("ClassName")`，方法内用 `ClassName.logger`；所有 **有业务副作用或 I/O 的** public 方法须 measure 包裹
+- **例外（可省略 measure）**：纯状态查询 getter（如 `size` / `isCold` / `getColdCount` / `pendingCount` / `getWebFetch`）；`Error` 子类构造函数；`export type` 与无状态纯函数模块（如 `FetchFlightPath.ts` 几何函数）
+- **例外（Logger）**：`FetchErrors.ts` 的 Error 子类、纯类型文件 `FetchTypes.ts` 可不建 Logger
 
 调试示例：
 
@@ -578,9 +596,32 @@ npm test
 - 跳过验证声称完成
 - 破坏 `CHANGELOG` / 版本对齐规则（§9）
 - 破坏模块化分层（§1.3）或 JSDoc 标准（§3）
+- **未获用户点名就主动加限制参数 / 限流门禁**（见 §10.8）
 
 ### 10.7 回归破坏时的处理
 
 1. 立即回滚或最小修复，恢复测试通过。
 2. 在 CHANGELOG **修复** 条目记录回归与修复。
 3. 若根因是架构误解，更新 §1 / §10 说明，避免重复发生。
+
+### 10.8 禁止主动加限制（用户未点名则不加）
+
+**原则：需要限制时，由用户明确要求再加。禁止「上来就做很多限制」——这是烦人且错误的默认行为。**
+
+| 禁止（未获用户明确要求） | 说明 |
+|--------------------------|------|
+| 拆更多并发上限 | 如再拆 reheat / keepAlive / task 等更小 cap |
+| 人为长退避 / 冷却 | 如默认 30s/60s 才允许重试 |
+| 硬门槛 | 如「热池至少 N 条才继续」 |
+| 强必填校验风暴 | 把大量 YAML 字段改成缺一崩溃 |
+| 预防性配额 / TopN / 次数封顶 | 「为了稳健」顺手阉割能力 |
+
+**允许：**
+
+- 用户 **明确说**「加这个限制 / 这个上限 / 这个退避」时，按要求加，不过度发挥
+- 实现功能或修 bug 所必需的最少逻辑（不是预防性限流）
+- 给配置写清注释（说明用途 ≠ 增加限制）
+
+**做错时：** 立刻撤回多余限制，恢复简单可用路径；不要用「为了安全/稳健」辩解。
+
+Cursor 规则文件：`.cursor/rules/geoclaw-no-premature-limits.mdc`（`alwaysApply: true`）。

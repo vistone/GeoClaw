@@ -60,6 +60,8 @@ export {
   HotConnectionPool,
   createHotConnectionPoolFromConfig,
   classifyWarmHttpStatus,
+  pickFairHotIp,
+  pickNearestExpiryHotIp,
 } from "./fetch/HotConnectionPool.js";
 export type {
   HotConnectionPoolOptions,
@@ -68,6 +70,7 @@ export type {
   WarmupSummary,
   HotPoolStats,
 } from "./fetch/HotConnectionPool.js";
+export type { HotIpPickCandidate } from "./fetch/HotIpPicker.js";
 
 export { FetchTaskPool } from "./fetch/FetchTaskPool.js";
 export type { FetchTaskPoolOptions, FetchTaskResult } from "./fetch/FetchTaskPool.js";
@@ -146,6 +149,7 @@ export {
   HotFetchNotOkError,
   HotFetchTransportError,
   HotFetchNoHotIpError,
+  HotFetchTimeoutError,
   FetchTaskMaxAttemptsError,
   isFetchRequeueError,
 } from "./fetch/FetchErrors.js";

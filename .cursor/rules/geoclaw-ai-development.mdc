@@ -20,6 +20,7 @@ alwaysApply: true
 - 删测试、删旧导出、改 Bulk 契约（nodes=120 等）来「让构建通过」
 - 未运行 `npm run typecheck` + `npm test` + `npm run jsdoc:check` 就声称完成
 - 扩大 scope：用户只问 A，顺带改无关的 B/C/D
+- **未获用户明确要求就主动加限制**：额外并发上限、长退避、冷却门禁、「至少 N 条」、强必填校验、预防性配额/TopN（见 §10.8）
 
 ## 完成前必须
 

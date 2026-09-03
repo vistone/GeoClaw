@@ -18,6 +18,9 @@ import {
   HotFetchTransportError,
 } from "./FetchErrors.js";
 import { ColdConnectionPool } from "./ColdConnectionPool.js";
+import { pickFairHotIp } from "./HotIpPicker.js";
+
+export { pickFairHotIp, pickNearestExpiryHotIp } from "./HotIpPicker.js";
 
 /** 单 IP 槽位状态 */
 export type HotSlotState = "pending" | "warming" | "hot" | "denied" | "failed";
@@ -177,13 +180,18 @@ export class HotConnectionPool {
   }
 
   /**
-   * 执行 runInitialWarmup。
-   * @returns 输出：`Promise<WarmupSummary>` — 异步返回 WarmupSummary
+   * 启动首轮预热并在完成后返回汇总。
+   * @returns 输出：`Promise<WarmupSummary>` — 预热汇总
    */
-
   async runInitialWarmup(): Promise<WarmupSummary> {
-    this.startInitialWarmup();
-    return this.waitInitialWarmup();
+    return HotConnectionPool.logger.measureAsync(
+      "runInitialWarmup",
+      async () => {
+        this.startInitialWarmup();
+        return this.waitInitialWarmup();
+      },
+      { total: this.slots.size },
+    );
   }
 
   /**
@@ -366,6 +374,12 @@ export class HotConnectionPool {
    * @throws {Error} 条件不满足或 I/O 失败时
    */
 
+  /**
+   * 经热连接发起单次 GET；非 successStatus 时踢池并抛错。
+   * @param url - 输入：`string` — 完整 HTTP URL
+   * @param extraHeaders - 输入：`Record<string, string>` — 附加请求头
+   * @returns 输出：`Promise<object>` — response、选用 IP、timings
+   */
   async fetchOnce(
     url: string,
     extraHeaders: Record<string, string> = {},
@@ -374,69 +388,75 @@ export class HotConnectionPool {
     ip: string;
     timings?: RequestTimings;
   }> {
-    if (this.hotIps.length === 0) {
-      throw new HotFetchNoHotIpError();
-    }
+    return HotConnectionPool.logger.measureAsync(
+      "fetchOnce",
+      async () => {
+        if (this.hotIps.length === 0) {
+          throw new HotFetchNoHotIpError();
+        }
 
-    const ip = this.pickHotIp();
-    const slot = this.slots.get(ip);
-    if (!slot?.client || this.coldPool.isCold(ip)) {
-      throw new HotFetchNoHotIpError();
-    }
-    // 一派出即计数，避免失败重试总砸同一条「参与少」的连接
-    slot.assignCount += 1;
+        const ip = this.pickHotIp();
+        const slot = this.slots.get(ip);
+        if (!slot?.client || this.coldPool.isCold(ip)) {
+          throw new HotFetchNoHotIpError();
+        }
+        // 一派出即计数，避免失败重试总砸同一条「参与少」的连接
+        slot.assignCount += 1;
 
-    let stats: RequestStats | undefined;
-    const t0 = Date.now();
-    try {
-      const response = await slot.client.get(url, {
-        headers: extraHeaders,
-        ...(this.options.timeoutMs !== undefined ? { timeout: this.options.timeoutMs } : {}),
-        onStats: (s: RequestStats) => {
-          stats = s;
-        },
-      });
-      const t1 = Date.now();
+        let stats: RequestStats | undefined;
+        const t0 = Date.now();
+        try {
+          const response = await slot.client.get(url, {
+            headers: extraHeaders,
+            ...(this.options.timeoutMs !== undefined ? { timeout: this.options.timeoutMs } : {}),
+            onStats: (s: RequestStats) => {
+              stats = s;
+            },
+          });
+          const t1 = Date.now();
 
-      if (response.status === this.options.successStatus) {
-        slot.lastUsedAt = t1;
-        const timings =
-          response.wreq.timings ??
-          stats?.timings ??
-          ({ startTime: t0, responseStart: t1, wait: t1 - t0 } satisfies RequestTimings);
-        return { response, ip, timings };
-      }
+          if (response.status === this.options.successStatus) {
+            slot.lastUsedAt = t1;
+            const timings =
+              response.wreq.timings ??
+              stats?.timings ??
+              ({ startTime: t0, responseStart: t1, wait: t1 - t0 } satisfies RequestTimings);
+            return { response, ip, timings };
+          }
 
-      void response.arrayBuffer().catch(() => undefined);
-      if (this.coldPool.shouldAdmit(response.status)) {
-        this.evictToColdPool(ip, response.status);
-      } else {
-        this.evictFailedFromHot(ip, response.status);
-      }
-      throw new HotFetchNotOkError(response.status, ip);
-    } catch (err) {
-      if (err instanceof HotFetchNotOkError) {
-        throw err;
-      }
-      // 超时：保留热连接，任务回队换 IP（不入待预热、不当错误）
-      if (isTimeoutError(err)) {
-        HotConnectionPool.logger.debug("热连接请求超时，保留热池并回队", {
-          ip,
-          timeoutMs: this.options.timeoutMs,
-          error: formatTransportError(err),
-        });
-        throw new HotFetchTimeoutError(ip, err);
-      }
-      this.evictFailedFromHot(ip, undefined, err);
-      throw new HotFetchTransportError(ip, err);
-    }
+          void response.arrayBuffer().catch(() => undefined);
+          if (this.coldPool.shouldAdmit(response.status)) {
+            this.evictToColdPool(ip, response.status);
+          } else {
+            this.evictFailedFromHot(ip, response.status);
+          }
+          throw new HotFetchNotOkError(response.status, ip);
+        } catch (err) {
+          if (err instanceof HotFetchNotOkError) {
+            throw err;
+          }
+          // 超时：保留热连接，任务回队换 IP（不入待预热、不当错误）
+          if (isTimeoutError(err)) {
+            HotConnectionPool.logger.debug("热连接请求超时，保留热池并回队", {
+              ip,
+              timeoutMs: this.options.timeoutMs,
+              error: formatTransportError(err),
+            });
+            throw new HotFetchTimeoutError(ip, err);
+          }
+          this.evictFailedFromHot(ip, undefined, err);
+          throw new HotFetchTransportError(ip, err);
+        }
+      },
+      { url, hotCount: this.hotIps.length },
+    );
   }
 
   /**
-   * 拉取 Get。
+   * 与 fetchOnce 相同（兼容旧名）。
    * @param url - 输入：`string` — 完整 HTTP URL
-   * @param extraHeaders - 输入：`Record<string, string>` — extraHeaders 参数
-   * @returns 输出：`Promise<object>` — 异步返回 object
+   * @param extraHeaders - 输入：`Record<string, string>` — 附加请求头
+   * @returns 输出：`Promise<object>` — response、选用 IP、timings
    */
   async fetchGet(
     url: string,
@@ -450,17 +470,22 @@ export class HotConnectionPool {
   }
 
   /**
-   * 执行 close。
+   * 停止后台重热并关闭全部热连接 client。
    * @returns 输出：无（`void`）
    */
-
   close(): void {
-    this.stopBackgroundReheat();
-    for (const slot of this.slots.values()) {
-      slot.client?.close();
-      slot.client = undefined;
-    }
-    this.hotIps.length = 0;
+    HotConnectionPool.logger.measureSync(
+      "close",
+      () => {
+        this.stopBackgroundReheat();
+        for (const slot of this.slots.values()) {
+          slot.client?.close();
+          slot.client = undefined;
+        }
+        this.hotIps.length = 0;
+      },
+      { slots: this.slots.size },
+    );
   }
 
   /**
@@ -657,7 +682,7 @@ export class HotConnectionPool {
 
     if (due.length === 0) return;
 
-    const concurrency = Math.max(1, this.options.keepAliveConcurrency || 20);
+    const concurrency = Math.max(1, this.options.keepAliveConcurrency);
     const batch = due.slice(0, concurrency).map((x) => x.ip);
     HotConnectionPool.logger.debug("热连接保活（快过期优先）", {
       count: batch.length,
@@ -843,51 +868,6 @@ export class HotConnectionPool {
     );
     return results;
   }
-}
-
-/**
- * 执行 pickFairHotIp。
- * @param candidates - 输入：`object[]` — candidates 参数
- * @param _now - 输入：`number` — _now 参数
- * @param _idleExpireMs - 输入：`number` — _idleExpireMs 参数
- * @returns 输出：`undefined | string` — undefined | string 实例
- */
-export function pickFairHotIp(
-  candidates: readonly { ip: string; lastUsedAt: number; assignCount: number }[],
-  _now = Date.now(),
-  _idleExpireMs = 0,
-): string | undefined {
-  if (candidates.length === 0) return undefined;
-
-  const sorted = [...candidates].sort((a, b) => {
-    if (a.assignCount !== b.assignCount) return a.assignCount - b.assignCount;
-    if (a.lastUsedAt !== b.lastUsedAt) return a.lastUsedAt - b.lastUsedAt;
-    return a.ip.localeCompare(b.ip);
-  });
-  return sorted[0]?.ip;
-}
-
-/**
- * 执行 pickNearestExpiryHotIp。
- * @param candidates - 输入：`object[]` — candidates 参数
- * @param now - 输入：`number` — now 参数
- * @param idleExpireMs - 输入：`number` — idleExpireMs 参数
- * @returns 输出：`undefined | string` — undefined | string 实例
- */
-export function pickNearestExpiryHotIp(
-  candidates: readonly { ip: string; lastUsedAt: number; assignCount?: number }[],
-  now: number,
-  idleExpireMs: number,
-): string | undefined {
-  return pickFairHotIp(
-    candidates.map((c) => ({
-      ip: c.ip,
-      lastUsedAt: c.lastUsedAt,
-      assignCount: c.assignCount ?? 0,
-    })),
-    now,
-    idleExpireMs,
-  );
 }
 
 /**

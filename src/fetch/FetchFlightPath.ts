@@ -1,4 +1,5 @@
 import type { HostPinRecord } from "./HostPinPool.js";
+import { GeoClawConfig } from "../core/GeoClawConfig.js";
 
 /** 地图航点（用于绘制飞行路线） */
 export type FlightWaypoint = {
@@ -259,10 +260,30 @@ export type FlightArcDisplayOptions = {
   visualByIp?: ReadonlyMap<string, RouteVisualStyle>;
 };
 
-export const DEFAULT_EARTH_RADIUS_KM = 6371;
-export const DEFAULT_LEO_ALTITUDE_MIN_KM = 12;
-export const DEFAULT_LEO_ALTITUDE_MAX_KM = 48;
-export const DEFAULT_ORBIT_DISPLAY_EXAGGERATION = 2.5;
+/**
+ * 用 YAML flightMap 补齐航线显示参数（禁止在本模块硬编码默认值）。
+ * @param display - 输入：`FlightArcDisplayOptions` — 调用方覆盖项
+ * @returns 输出：`RequiredFlightArcDisplay` — 完整显示参数
+ */
+export function resolveFlightArcDisplay(display: FlightArcDisplayOptions = {}): RequiredFlightArcDisplay {
+  const cfg = GeoClawConfig.get().getFlightMapConfig();
+  return {
+    earthRadiusKm: display.earthRadiusKm ?? cfg.earthRadiusKm,
+    leoAltitudeMinKm: display.leoAltitudeMinKm ?? cfg.leoAltitudeMinKm,
+    leoAltitudeMaxKm: display.leoAltitudeMaxKm ?? cfg.leoAltitudeMaxKm,
+    orbitDisplayExaggeration: display.orbitDisplayExaggeration ?? cfg.orbitDisplayExaggeration,
+    visualByIp: display.visualByIp,
+  };
+}
+
+/** 已补齐的飞行弧显示参数 */
+export type RequiredFlightArcDisplay = {
+  earthRadiusKm: number;
+  leoAltitudeMinKm: number;
+  leoAltitudeMaxKm: number;
+  orbitDisplayExaggeration: number;
+  visualByIp?: ReadonlyMap<string, RouteVisualStyle>;
+};
 
 /**
  * 执行 greatCircleArc。
@@ -455,8 +476,8 @@ export function assignDistinctRouteVisuals(
   const out = new Map<string, RouteVisualStyle>();
   if (n === 0) return out;
 
-  const minKm = display.leoAltitudeMinKm ?? DEFAULT_LEO_ALTITUDE_MIN_KM;
-  const configuredMax = display.leoAltitudeMaxKm ?? DEFAULT_LEO_ALTITUDE_MAX_KM;
+  const minKm = resolveFlightArcDisplay(display).leoAltitudeMinKm;
+  const configuredMax = resolveFlightArcDisplay(display).leoAltitudeMaxKm;
   // 保证区间至少能放下 n 个互不相同的整数高度
   const maxKm = Math.max(configuredMax, minKm + (n - 1));
   // 色相起点随集合指纹轻微偏移，集合不变则颜色稳定
@@ -532,12 +553,12 @@ export function angularDistanceRad(
 export function leoOrbitalBowDeg(
   thetaRad: number,
   altitudeKm: number,
-  earthRadiusKm: number = DEFAULT_EARTH_RADIUS_KM,
+  earthRadiusKm?: number,
 ): number {
   const half = thetaRad / 2;
   if (half < 1e-9) return 0;
   const h = Math.max(0, altitudeKm);
-  const R = Math.max(1, earthRadiusKm);
+  const R = Math.max(1, earthRadiusKm ?? resolveFlightArcDisplay().earthRadiusKm);
   const deltaSagitta = h * (1 - Math.cos(half));
   const halfChord = R * Math.sin(half);
   return Math.atan2(deltaSagitta, Math.max(halfChord, 1e-6)) * RAD2DEG;
@@ -576,8 +597,8 @@ export function routeVisualFromIp(
   const light = band === 0 ? 42 : band === 1 ? 55 : 68;
   const color = `hsl(${hue.toFixed(1)} ${sat}% ${light}%)`;
 
-  const minKm = display.leoAltitudeMinKm ?? DEFAULT_LEO_ALTITUDE_MIN_KM;
-  const maxKm = Math.max(minKm, display.leoAltitudeMaxKm ?? DEFAULT_LEO_ALTITUDE_MAX_KM);
+  const minKm = resolveFlightArcDisplay(display).leoAltitudeMinKm;
+  const maxKm = Math.max(minKm, resolveFlightArcDisplay(display).leoAltitudeMaxKm);
   const span = maxKm - minKm;
   const leoAltitudeKm = span <= 0 ? minKm : minKm + (hashRequestId(`${ip}:leo`) % (Math.floor(span) + 1));
 
@@ -708,9 +729,9 @@ export function mapDisplayArc(
   to: { lat: number; lng: number },
   options: GreatCircleArcOptions = {},
 ): [number, number][] {
-  const R = options.earthRadiusKm ?? DEFAULT_EARTH_RADIUS_KM;
+  const R = options.earthRadiusKm ?? resolveFlightArcDisplay().earthRadiusKm;
   const altitudeKm = options.altitudeKm ?? 30;
-  const exag = options.orbitDisplayExaggeration ?? DEFAULT_ORBIT_DISPLAY_EXAGGERATION;
+  const exag = options.orbitDisplayExaggeration ?? resolveFlightArcDisplay().orbitDisplayExaggeration;
 
   const theta = angularDistanceRad(from, to);
   const bowPeak =
@@ -850,18 +871,18 @@ function buildRouteLineGeometry(
   const targetIp = flightPathTargetIp(path) ?? path.requestId;
   const visual = routeVisualFromIp(targetIp, display);
   const merged: GreatCircleArcOptions = {
-    earthRadiusKm: display.earthRadiusKm ?? DEFAULT_EARTH_RADIUS_KM,
+    earthRadiusKm: resolveFlightArcDisplay(display).earthRadiusKm,
     orbitDisplayExaggeration:
-      display.orbitDisplayExaggeration ?? DEFAULT_ORBIT_DISPLAY_EXAGGERATION,
+      resolveFlightArcDisplay(display).orbitDisplayExaggeration,
     altitudeKm: arcOptions.altitudeKm ?? visual.leoAltitudeKm,
     ...arcOptions,
   };
   merged.altitudeKm = arcOptions.altitudeKm ?? visual.leoAltitudeKm;
-  merged.earthRadiusKm = arcOptions.earthRadiusKm ?? display.earthRadiusKm ?? DEFAULT_EARTH_RADIUS_KM;
+  merged.earthRadiusKm = arcOptions.earthRadiusKm ?? resolveFlightArcDisplay(display).earthRadiusKm;
   merged.orbitDisplayExaggeration =
     arcOptions.orbitDisplayExaggeration ??
     display.orbitDisplayExaggeration ??
-    DEFAULT_ORBIT_DISPLAY_EXAGGERATION;
+    resolveFlightArcDisplay().orbitDisplayExaggeration;
 
   const coords: [number, number][] = [];
   let prevLng = wps[0]!.lng;
@@ -964,8 +985,8 @@ export function flightPathsToGeoJsonCollection(
       leoOrbitalBowDeg(
         theta,
         visual.leoAltitudeKm,
-        display.earthRadiusKm ?? DEFAULT_EARTH_RADIUS_KM,
-      ) * (display.orbitDisplayExaggeration ?? DEFAULT_ORBIT_DISPLAY_EXAGGERATION);
+        resolveFlightArcDisplay(display).earthRadiusKm,
+      ) * (resolveFlightArcDisplay(display).orbitDisplayExaggeration);
 
     features.push({
       type: "Feature",
@@ -986,7 +1007,7 @@ export function flightPathsToGeoJsonCollection(
             pinnedIp: targetIp,
             routeColor: visual.color,
             leoAltitudeKm: visual.leoAltitudeKm,
-            earthRadiusKm: display.earthRadiusKm ?? DEFAULT_EARTH_RADIUS_KM,
+            earthRadiusKm: resolveFlightArcDisplay(display).earthRadiusKm,
             arcBowDeg: Number(bowDeg.toFixed(3)),
             url: path.url,
             targetHostname: path.targetHostname,
