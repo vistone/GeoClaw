@@ -133,7 +133,7 @@ fetchRoute:
 ipinfo:
   # false：禁用 ipinfo（originMode=ipinfo 时将无法自动取出口坐标）
   enabled: true
-  # API token；建议 null + 环境变量 IPINFO_TOKEN，勿把真实 token 提交进仓库
+  # API token：YAML 保持 null；本地测试写项目根 .env 的 IPINFO_TOKEN（见 .env.example）
   token: null
   # ipinfo API 根 URL
   baseUrl: https://ipinfo.io

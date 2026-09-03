@@ -16,7 +16,8 @@ import {
 export type { BytesLike } from "./core/BytesLike.js";
 export { Logger, LogLevel, logLevelFromString } from "./core/Logger.js";
 export { GeoClawConfig, geoclawConfig } from "./core/GeoClawConfig.js";
-export type { GeoClawConfigFile } from "./core/GeoClawConfig.js";
+export type { GeoClawConfigFile, IpInfoRuntimeOptions } from "./core/GeoClawConfig.js";
+export { loadDotEnv } from "./core/loadDotEnv.js";
 
 export {
   BulkMetadataRequestSchema,

@@ -6,6 +6,7 @@ import { parse as parseYaml } from "yaml";
 import type { BrowserEmulationOptions, BrowserPlatform, BrowserProfile } from "node-wreq";
 
 import { setGlobalLogLevel, LogLevel, logLevelFromString } from "./LogConfig.js";
+import { loadDotEnv } from "./loadDotEnv.js";
 import type { HostPinPoolOptions } from "../fetch/HostPinPool.js";
 import { loadHostPinRecordsFromYaml } from "../fetch/HostPinPool.js";
 import type { HotConnectionPoolOptions } from "../fetch/HotConnectionPool.js";
@@ -175,6 +176,7 @@ export class GeoClawConfig {
     if (GeoClawConfig.instance) {
       return GeoClawConfig.instance;
     }
+    loadDotEnv(PACKAGE_ROOT);
     const resolved = GeoClawConfig.resolveConfigPath(configPath);
     const raw = readFileSync(resolved, "utf8");
     const parsed = parseYaml(raw) as GeoClawConfigFile;

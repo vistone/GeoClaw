@@ -4,6 +4,11 @@ benchmark/
 *.log
 .DS_Store
 
+# 本地密钥（IPINFO_TOKEN / BING_MAPS_KEY 等），勿提交
+.env
+.env.local
+.env.*.local
+
 # 按域名的运行时 IP 请求统计
 config/ip-stats/*.yaml
 config/ip-stats/*.yml
