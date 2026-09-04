@@ -378,11 +378,19 @@ export class HotConnectionPool {
    * 经热连接发起单次 GET；非 successStatus 时踢池并抛错。
    * @param url - 输入：`string` — 完整 HTTP URL
    * @param extraHeaders - 输入：`Record<string, string>` — 附加请求头
+   * @param pick - 输入：`undefined | object` — timeoutMs / warmSlack / exploreRatio
    * @returns 输出：`Promise<object>` — response、选用 IP、timings
    */
   async fetchOnce(
     url: string,
     extraHeaders: Record<string, string> = {},
+    pick?: {
+      timeoutMs?: number;
+      /** 软公平带宽：带内优先复用最近用过的热连接；落后 IP 仍会补上 */
+      warmSlack?: number;
+      /** 0~1：以该概率走严格公平（最久未用），保证全池都会被打到 */
+      exploreRatio?: number;
+    },
   ): Promise<{
     response: Awaited<ReturnType<Client["get"]>>;
     ip: string;
@@ -395,7 +403,7 @@ export class HotConnectionPool {
           throw new HotFetchNoHotIpError();
         }
 
-        const ip = this.pickHotIp();
+        const ip = this.pickHotIp(pick?.warmSlack, pick?.exploreRatio);
         const slot = this.slots.get(ip);
         if (!slot?.client || this.coldPool.isCold(ip)) {
           throw new HotFetchNoHotIpError();
@@ -403,12 +411,13 @@ export class HotConnectionPool {
         // 一派出即计数，避免失败重试总砸同一条「参与少」的连接
         slot.assignCount += 1;
 
+        const timeoutMs = pick?.timeoutMs ?? this.options.timeoutMs;
         let stats: RequestStats | undefined;
         const t0 = Date.now();
         try {
           const response = await slot.client.get(url, {
             headers: extraHeaders,
-            ...(this.options.timeoutMs !== undefined ? { timeout: this.options.timeoutMs } : {}),
+            ...(timeoutMs !== undefined ? { timeout: timeoutMs } : {}),
             onStats: (s: RequestStats) => {
               stats = s;
             },
@@ -424,11 +433,10 @@ export class HotConnectionPool {
             return { response, ip, timings };
           }
 
+          // 非 200：丢弃 body（不 await），403/429 入冷池；其余保留热连接，任务立即回队
           void response.arrayBuffer().catch(() => undefined);
           if (this.coldPool.shouldAdmit(response.status)) {
             this.evictToColdPool(ip, response.status);
-          } else {
-            this.evictFailedFromHot(ip, response.status);
           }
           throw new HotFetchNotOkError(response.status, ip);
         } catch (err) {
@@ -439,7 +447,7 @@ export class HotConnectionPool {
           if (isTimeoutError(err)) {
             HotConnectionPool.logger.debug("热连接请求超时，保留热池并回队", {
               ip,
-              timeoutMs: this.options.timeoutMs,
+              timeoutMs,
               error: formatTransportError(err),
             });
             throw new HotFetchTimeoutError(ip, err);
@@ -448,7 +456,13 @@ export class HotConnectionPool {
           throw new HotFetchTransportError(ip, err);
         }
       },
-      { url, hotCount: this.hotIps.length },
+      {
+        url,
+        hotCount: this.hotIps.length,
+        warmSlack: pick?.warmSlack ?? null,
+        exploreRatio: pick?.exploreRatio ?? null,
+        timeoutMs: pick?.timeoutMs ?? this.options.timeoutMs ?? null,
+      },
     );
   }
 
@@ -703,10 +717,9 @@ export class HotConnectionPool {
           slot.lastStatus = response.status;
           return;
         }
+        // 保活非 200：403/429 入冷池；其余保留热连接（与下载路径一致，不踢池占重热）
         if (this.coldPool.shouldAdmit(response.status)) {
           this.evictToColdPool(ip, response.status);
-        } else {
-          this.evictFailedFromHot(ip, response.status);
         }
       } catch (err) {
         // 保活超时：不算错误，不踢热池
@@ -769,12 +782,12 @@ export class HotConnectionPool {
   }
 
   /**
-   * 选取业务 IP：优先参与少的，同次数则优先快过期（久未用），让全池更均匀地接到任务。
-   * 快过期的无流量续命仍由 keepAliveIdleHot 负责。
+   * 选取业务 IP。
+   * @param warmSlack - 输入：`undefined | number` — 软公平带宽；>0 时带内优先最近用过
+   * @param exploreRatio - 输入：`undefined | number` — 0~1，以该概率严格公平（保证全池都会用到）
    * @returns 输出：`string` — IP 地址
    */
-
-  private pickHotIp(): string {
+  private pickHotIp(warmSlack?: number, exploreRatio?: number): string {
     const now = Date.now();
     const candidates: { ip: string; lastUsedAt: number; assignCount: number }[] = [];
 
@@ -795,7 +808,12 @@ export class HotConnectionPool {
       });
     }
 
-    const picked = pickFairHotIp(candidates, now, this.options.idleExpireMs);
+    const explore = Math.max(0, Math.min(1, exploreRatio ?? 0));
+    const useStrictFair = explore > 0 && Math.random() < explore;
+    const slack = useStrictFair ? 0 : Math.max(0, Math.floor(warmSlack ?? 0));
+    const picked = pickFairHotIp(candidates, now, this.options.idleExpireMs, {
+      warmSlack: slack,
+    });
     if (!picked) {
       throw new HotFetchNoHotIpError();
     }

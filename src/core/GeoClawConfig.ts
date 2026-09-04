@@ -12,6 +12,7 @@ import { loadHostPinRecordsFromYaml } from "../fetch/HostPinPool.js";
 import type { HotConnectionPoolOptions } from "../fetch/HotConnectionPool.js";
 import type { FetchRouteOptions } from "../fetch/FetchFlightPath.js";
 import type { FetchMetricsOptions } from "../fetch/FetchMetrics.js";
+import type { FetchExportOptions } from "../fetch/FetchExportSink.js";
 import type { ProxyMode } from "../fetch/FetchTypes.js";
 
 /** config/geoclaw.yaml 文件结构 */
@@ -94,6 +95,16 @@ export type GeoClawConfigFile = {
     ipStatsFlushIntervalMs?: number;
     ipStatsSeedFromHostPin?: boolean;
   };
+  /** 出站：进站响应原样 PUT（与进站 fetch 分离） */
+  fetchExport?: {
+    enabled?: boolean;
+    method?: "PUT";
+    url?: string | null;
+    headers?: Record<string, string>;
+    timeoutMs?: number | null;
+    proxyMode?: ProxyMode;
+    failOpen?: boolean;
+  };
   fetchRoute?: {
     originMode: "ipinfo" | "manual";
     origin: {
@@ -134,13 +145,24 @@ export type GeoClawConfigFile = {
     routeDrawMs?: number;
     routeHoldMs?: number;
     routeFadeMs?: number;
-    stressConcurrency?: number;
-    stressTotal?: number | null;
-    stressOnStart?: boolean;
     /** 网卡名；null/空=默认路由网卡 */
     nicIface?: string | null;
     /** 网卡流量采样间隔（毫秒） */
     nicSampleMs?: number;
+    /** 脉冲 WS 连续冲刷间隔（毫秒） */
+    pulseStreamMs?: number;
+    /** 单客户端 WS 发送缓冲上限（字节）；超限丢弃本帧脉冲 */
+    wsMaxBufferedBytes?: number;
+  };
+  /** 测试工具：热路径压测（stress:hot → flight:map /api/stress；主页无 UI） */
+  stressTest?: {
+    concurrency?: number;
+    total?: number;
+    url?: string | null;
+    waitHot?: boolean;
+    waitHotMs?: number;
+    /** 压测单次请求超时（毫秒）；只释放并发槽，不把慢 IP 排除出选路 */
+    requestTimeoutMs?: number;
   };
 };
 
@@ -398,11 +420,10 @@ export class GeoClawConfig {
     routeDrawMs: number;
     routeHoldMs: number;
     routeFadeMs: number;
-    stressConcurrency: number;
-    stressTotal: number | null;
-    stressOnStart: boolean;
     nicIface: string | null;
     nicSampleMs: number;
+    pulseStreamMs: number;
+    wsMaxBufferedBytes: number;
   } {
     const m = this.file.flightMap;
     const planetoid = joinUrl(this.file.rocktree.baseUrl, this.file.benchmark.planetoidPath);
@@ -426,11 +447,33 @@ export class GeoClawConfig {
       routeDrawMs: m?.routeDrawMs ?? 1400,
       routeHoldMs: m?.routeHoldMs ?? 16000,
       routeFadeMs: m?.routeFadeMs ?? 4000,
-      stressConcurrency: m?.stressConcurrency ?? 40,
-      stressTotal: m?.stressTotal ?? null,
-      stressOnStart: m?.stressOnStart ?? false,
       nicIface: m?.nicIface?.trim() || null,
       nicSampleMs: m?.nicSampleMs ?? 1000,
+      pulseStreamMs: m?.pulseStreamMs ?? 16,
+      wsMaxBufferedBytes: m?.wsMaxBufferedBytes ?? 1_048_576,
+    };
+  }
+
+  /**
+   * 返回测试用热路径压测选项（stress:hot / flight-map `/api/stress`）。
+   * @returns 输出：object — concurrency/total/url/waitHot/waitHotMs/requestTimeoutMs
+   */
+  getStressTestOptions(): {
+    concurrency: number;
+    total: number;
+    url: string | null;
+    waitHot: boolean;
+    waitHotMs: number;
+    requestTimeoutMs: number;
+  } {
+    const s = this.file.stressTest;
+    return {
+      concurrency: Math.max(1, s?.concurrency ?? 64),
+      total: Math.max(1, s?.total ?? 10_000),
+      url: s?.url ?? null,
+      waitHot: s?.waitHot ?? true,
+      waitHotMs: Math.max(1000, s?.waitHotMs ?? 120_000),
+      requestTimeoutMs: Math.max(200, s?.requestTimeoutMs ?? 3_000),
     };
   }
 
@@ -505,15 +548,13 @@ export class GeoClawConfig {
   }
 
   /**
-   * 返回 FetchTaskPool 并发与最大尝试次数。
+   * 返回业务下载任务池并发（与热池预热/重热/保活并发分离）。
    * @returns 输出：`{ concurrency: number; maxAttempts: number | null }` — 任务池参数
    */
   getFetchTaskPoolOptions(): { concurrency: number; maxAttempts: number | null } {
     const warm = this.file.warmPool;
-    const concurrency = Math.max(
-      1,
-      warm?.taskConcurrency ?? warm?.concurrency ?? warm?.initialConcurrency ?? 200,
-    );
+    // 只用 taskConcurrency；不再回落到 warmPool.concurrency（那是热池运维专用）
+    const concurrency = Math.max(1, warm?.taskConcurrency ?? 500);
     return {
       concurrency,
       maxAttempts: warm?.maxTaskAttempts ?? null,
@@ -544,6 +585,27 @@ export class GeoClawConfig {
       ipStatsDir: m?.ipStatsDir ?? "config/ip-stats",
       ipStatsFlushIntervalMs: m?.ipStatsFlushIntervalMs ?? 5_000,
       ipStatsSeedFromHostPin: m?.ipStatsSeedFromHostPin ?? true,
+    };
+  }
+
+  /**
+   * 返回出站 PUT 存档选项（与进站 fetch 分离）。
+   * @returns 输出：`FetchExportOptions` — enabled/url/headers/proxyMode/failOpen
+   */
+  getFetchExportOptions(): FetchExportOptions {
+    const e = this.file.fetchExport;
+    const method = e?.method ?? "PUT";
+    if (method !== "PUT") {
+      throw new Error(`fetchExport.method 仅支持 PUT，收到: ${String(method)}`);
+    }
+    return {
+      enabled: e?.enabled ?? false,
+      method: "PUT",
+      url: e?.url ?? null,
+      headers: { ...(e?.headers ?? { "Content-Type": "application/octet-stream" }) },
+      timeoutMs: e?.timeoutMs === undefined ? 30_000 : e.timeoutMs,
+      proxyMode: e?.proxyMode ?? "never",
+      failOpen: e?.failOpen ?? true,
     };
   }
 

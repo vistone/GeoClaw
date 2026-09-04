@@ -170,6 +170,16 @@ export type {
 } from "./fetch/WebFetch.js";
 
 export {
+  FetchExportSink,
+  createFetchExportSinkFromConfig,
+} from "./fetch/FetchExportSink.js";
+export type {
+  FetchExportOptions,
+  FetchExportPutFn,
+  FetchExportSinkOptions,
+} from "./fetch/FetchExportSink.js";
+
+export {
   TlsFingerprintCodec,
   BROWSER_TLS_PROFILES,
 } from "./fetch/TlsFingerprintCodec.js";

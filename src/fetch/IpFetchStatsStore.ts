@@ -134,6 +134,46 @@ export class IpFetchStatsStore {
   }
 
   /**
+   * 批量累加某 IP 的请求计数（压测刷盘，避免逐次 recordAttempt）。
+   * @param args - 输入：`{ hostname; ip; success; failed; durationSumMs; ... }` — 域名、IP、成功/失败次数、耗时合计与字节
+   * @returns 输出：无（`void`）
+   */
+  recordBatch(args: {
+    hostname: string;
+    ip: string;
+    success: number;
+    failed: number;
+    durationSumMs: number;
+    bytes?: number;
+    city?: string;
+    region?: string;
+    country?: string;
+    loc?: string;
+  }): void {
+    IpFetchStatsStore.logger.measureSync(
+      "recordBatch",
+      () => {
+        const hostname = normalizeHostname(args.hostname);
+        if (!hostname || !args.ip) return;
+        const success = Math.max(0, Math.floor(args.success));
+        const failed = Math.max(0, Math.floor(args.failed));
+        if (success === 0 && failed === 0) return;
+        const row = this.ensure(hostname, args.ip, args);
+        row.requests += success + failed;
+        row.success += success;
+        row.failed += failed;
+        row.totalDurationMs += Math.max(0, args.durationSumMs);
+        if (args.bytes && args.bytes > 0) {
+          row.totalBytes += args.bytes;
+        }
+        this.markDirty(hostname);
+        this.bumpRevision(hostname);
+      },
+      { hostname: args.hostname, ip: args.ip, success: args.success, failed: args.failed },
+    );
+  }
+
+  /**
    * 向指定域名 IP 追加下载字节。
    * @param hostname - 输入：`string` — 请求主机名
    * @param ip - 输入：`string` — 连接 IP
@@ -352,14 +392,14 @@ export class IpFetchStatsStore {
     );
   }
 
-  /** 按 revision 缓存的活跃 IP 交错序列 */
+  /** 按 revision 缓存的全量 IP 交错序列（有请求在前） */
   private readonly orderedActiveIpCache = new Map<
     string,
     { revision: number; ips: string[] }
   >();
 
   /**
-   * 返回有请求 IP 的稳定交错序列（v4/v6 按请求量交错）。
+   * 返回域名下全部 IP 的稳定交错序列（有请求优先，再零请求；v4/v6 交错）。
    * @param hostname - 输入：`string` — 请求主机名
    * @param countryFilter - 输入：`string | null | undefined` — ISO 国别码；空=全部；`ZZ`=无国别
    * @returns 输出：`string[]` — IP 列表；非法主机名为空数组
@@ -377,18 +417,34 @@ export class IpFetchStatsStore {
           ips = hit.ips;
         } else {
           const bucket = this.ensureDomain(host);
-          const listV4: Array<[string, IpFetchStatRow]> = [];
-          const listV6: Array<[string, IpFetchStatRow]> = [];
+          const activeV4: Array<[string, IpFetchStatRow]> = [];
+          const activeV6: Array<[string, IpFetchStatRow]> = [];
+          const idleV4: Array<[string, IpFetchStatRow]> = [];
+          const idleV6: Array<[string, IpFetchStatRow]> = [];
           for (const [ip, row] of bucket.rows) {
-            if ((row.requests ?? 0) <= 0) continue;
-            (ip.includes(":") ? listV6 : listV4).push([ip, row]);
+            const bucketList =
+              (row.requests ?? 0) > 0
+                ? ip.includes(":")
+                  ? activeV6
+                  : activeV4
+                : ip.includes(":")
+                  ? idleV6
+                  : idleV4;
+            bucketList.push([ip, row]);
           }
           const byReq = (a: [string, IpFetchStatRow], b: [string, IpFetchStatRow]) =>
             b[1].requests - a[1].requests || a[0].localeCompare(b[0]);
-          listV4.sort(byReq);
-          listV6.sort(byReq);
-          const pairs = interleavePairs(listV4, listV6, listV4.length + listV6.length);
-          ips = pairs.map(([ip]) => ip);
+          activeV4.sort(byReq);
+          activeV6.sort(byReq);
+          idleV4.sort(byReq);
+          idleV6.sort(byReq);
+          const active = interleavePairs(
+            activeV4,
+            activeV6,
+            activeV4.length + activeV6.length,
+          );
+          const idle = interleavePairs(idleV4, idleV6, idleV4.length + idleV6.length);
+          ips = [...active, ...idle].map(([ip]) => ip);
           this.orderedActiveIpCache.set(host, { revision, ips });
         }
         const filter = normalizeCountryFilter(countryFilter);
@@ -404,7 +460,7 @@ export class IpFetchStatsStore {
   }
 
   /**
-   * 按交错序截取活跃 IP 窗口并返回行数据。
+   * 按交错序截取 IP 窗口并返回行数据（含零请求种子行）。
    * @param hostname - 输入：`string` — 请求主机名
    * @param start - 输入：`number` — 起始下标（从 0，含）
    * @param count - 输入：`number` — 窗口条数
@@ -571,6 +627,17 @@ export class IpFetchStatsStore {
             countryAgg.set(code, cur);
           } else if (onlyActive) {
             continue;
+          } else {
+            const code = normalizeCountryCode(row.country);
+            const cur = countryAgg.get(code) ?? {
+              ips: 0,
+              requests: 0,
+              success: 0,
+              failed: 0,
+              totalBytes: 0,
+            };
+            cur.ips += 1;
+            countryAgg.set(code, cur);
           }
           if (includeRows) {
             (ip.includes(":") ? listV6 : listV4).push([ip, row]);
@@ -704,6 +771,29 @@ export class IpFetchStatsStore {
     return join(this.dirPath, `${normalizeHostname(hostname)}.yaml`);
   }
 
+  /**
+   * 对尚无统计 YAML 的域名执行种子化并立即落盘。
+   * @param hostnames - 输入：`readonly string[]` — 待补建的主机名
+   * @returns 输出：`number` — 新写入的文件数
+   */
+  materializeMissingFromSeeds(hostnames: readonly string[]): number {
+    return IpFetchStatsStore.logger.measureSync(
+      "materializeMissingFromSeeds",
+      () => {
+        let written = 0;
+        for (const raw of hostnames) {
+          const host = normalizeHostname(raw);
+          if (!host) continue;
+          if (existsSync(this.filePathFor(host))) continue;
+          this.ensureDomain(host);
+          if (existsSync(this.filePathFor(host))) written += 1;
+        }
+        return written;
+      },
+      { hostnameCount: hostnames.length },
+    );
+  }
+
   private flushHostname(hostname: string): void {
     const host = normalizeHostname(hostname);
     if (!host) return;
@@ -770,6 +860,8 @@ export class IpFetchStatsStore {
       this.domains.set(hostname, bucket);
     }
     if (!bucket.loaded) {
+      const filePath = this.filePathFor(hostname);
+      const missingFile = !existsSync(filePath);
       // 先标记已加载，避免 seed → ensure 重入再次 load
       bucket.loaded = true;
       this.loadHostname(hostname, bucket);
@@ -780,6 +872,16 @@ export class IpFetchStatsStore {
             this.ensure(hostname, r.ip, r);
           }
         }
+      }
+      // 缺统计文件时：种子一旦有 IP，立刻落盘，不依赖刷盘定时器
+      if (missingFile && bucket.rows.size > 0) {
+        bucket.dirty = true;
+        this.flushHostname(hostname);
+        IpFetchStatsStore.logger.info("已从 HostPin 种子建立 IP 统计", {
+          hostname,
+          ips: bucket.rows.size,
+          path: filePath,
+        });
       }
     }
     return bucket;

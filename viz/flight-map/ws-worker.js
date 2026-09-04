@@ -1,7 +1,8 @@
 /**
  * WS Worker：独占 WebSocket 读写。
  * - ipStats → 专用 port 交给 IP Stats Worker（与主线程无交集）
- * - 其余消息 → 主线程（地图 / 脉冲）
+ * - 高频可合并消息（pulse / poolStatus / nicTraffic）只保留最新，淘汰积压
+ * - 其余消息 → 主线程
  */
 
 /** @type {WebSocket | null} */
@@ -13,6 +14,15 @@ let ipStatsPort = null;
 /** @type {ReturnType<typeof setTimeout> | null} */
 let reconnectTimer = null;
 let intentionalClose = false;
+
+/** 可合并类型：主线程忙时只保留最新一帧 */
+const COALESCE_TYPES = new Set(["pulse", "poolStatus", "nicTraffic"]);
+
+/** @type {Map<string, object>} */
+const pendingByType = new Map();
+/** @type {object[]} */
+const pendingExact = [];
+let flushScheduled = false;
 
 self.onmessage = (ev) => {
   const msg = ev.data;
@@ -81,7 +91,7 @@ function connect() {
       return;
     }
 
-    self.postMessage({ type: "wsMessage", data });
+    enqueueToMain(data);
   });
 
   ws.addEventListener("close", () => {
@@ -93,6 +103,67 @@ function connect() {
   ws.addEventListener("error", () => {
     self.postMessage({ type: "wsError", error: "websocket error" });
   });
+}
+
+/**
+ * 入队主线程：可合并类型覆盖旧帧；脉冲按落点合并 items。
+ * @param {object} data
+ */
+function enqueueToMain(data) {
+  const t = String(data.type ?? "");
+  if (COALESCE_TYPES.has(t)) {
+    if (t === "pulse") {
+      pendingByType.set(t, mergePulse(pendingByType.get(t), data));
+    } else {
+      pendingByType.set(t, data);
+    }
+  } else {
+    pendingExact.push(data);
+  }
+  scheduleFlushToMain();
+}
+
+/**
+ * 合并两帧 pulse：同 IP 只保留最新一条。
+ * @param {object | undefined} prev
+ * @param {object} next
+ */
+function mergePulse(prev, next) {
+  /** @type {Map<string, object>} */
+  const byIp = new Map();
+  for (const item of prev?.items ?? []) {
+    const ip = String(item?.ip ?? "");
+    if (ip) byIp.set(ip, item);
+  }
+  for (const item of next?.items ?? []) {
+    const ip = String(item?.ip ?? "");
+    if (ip) byIp.set(ip, item);
+  }
+  return {
+    ...next,
+    items: [...byIp.values()],
+  };
+}
+
+function scheduleFlushToMain() {
+  if (flushScheduled) return;
+  flushScheduled = true;
+  // 约一帧一次交给主线程；期间到达的可合并消息只保留最新
+  setTimeout(() => {
+    flushScheduled = false;
+    const exact = pendingExact.splice(0, pendingExact.length);
+    const coalesced = [...pendingByType.values()];
+    pendingByType.clear();
+    for (const data of exact) {
+      self.postMessage({ type: "wsMessage", data });
+    }
+    for (const data of coalesced) {
+      self.postMessage({ type: "wsMessage", data });
+    }
+    if (pendingExact.length > 0 || pendingByType.size > 0) {
+      scheduleFlushToMain();
+    }
+  }, 16);
 }
 
 function scheduleReconnect() {

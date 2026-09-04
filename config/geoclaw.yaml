@@ -21,8 +21,8 @@ fetch:
   forceIdentityEncoding: true
   # true：每次请求打印传输 trace（profile、是否 H2、耗时等）
   logTransportTrace: false
-  # 热池/业务请求超时（毫秒）；超时不踢热连接，任务回队换 IP 再试；null=不限制
-  timeoutMs: 2000
+  # 热池/业务请求超时（毫秒）；高并发经代理时 2s 易大面积超时→传输失败掏空热池；null=不限制
+  timeoutMs: 15000
 
 # ---------- TLS / 浏览器指纹（node-wreq） ----------
 tls:
@@ -84,8 +84,10 @@ warmPool:
   coldPoolStatuses: [403, 429]
   successStatus: 200
   autoStartWarmup: true
-  # 唯一并发旋钮：首轮预热 / 重热 / 保活 / 下载任务共用（勿再拆一堆更小的上限）
+  # 仅热池运维并发：首轮预热 / 后台重热 / 保活（与压测、业务下载无关）
   concurrency: 200
+  # 仅业务下载任务池并发（WebFetch 热路径发请求的 worker 数；与热池运维 concurrency 分开）
+  taskConcurrency: 500
   # 后台重热轮询间隔（毫秒）
   reheatIntervalMs: 5000
   # 失败后统一退避（毫秒）；0=尽快再试，不人为卡很久
@@ -115,8 +117,26 @@ fetchMetrics:
   ipStatsDir: config/ip-stats
   # 统计刷盘间隔（毫秒）；0=仅进程退出或显式 flush 时写
   ipStatsFlushIntervalMs: 5000
-  # true：启动时用 HostPin YAML 种子化全部 IP 行（便于显示全量 IP）
+  # true：config/ip-stats/<域名>.yaml 不存在时，用 config/<域名>.yaml（HostPin）建零计数统计素材并落盘
   ipStatsSeedFromHostPin: true
+
+# ---------- 出站：进站成功后的响应原样 PUT（与进站 fetch 严格分离） ----------
+fetchExport:
+  # false：不 PUT；true 且 url 非空时，每次 WebFetch 进站 200 后原样上传
+  enabled: false
+  # 固定 PUT（出站写存储）
+  method: PUT
+  # PUT 完整 URL；null=未配置，即使 enabled 也不发
+  url: null
+  # 出站专用头（不继承 fetch.contextHeaders / TLS profile；按存储方约定自行写全）
+  headers:
+    Content-Type: application/octet-stream
+  # 出站超时（毫秒）；null=不限制
+  timeoutMs: null
+  # 出站是否走全局 proxy：never | always | auto（默认 never，存档直连）
+  proxyMode: never
+  # true：PUT 失败只记日志，进站仍把原字节返回给调用方
+  failOpen: true
 
 # ---------- 飞行路线 origin / 目标解析 ----------
 fetchRoute:
@@ -182,13 +202,24 @@ flightMap:
   routeHoldMs: 16000
   # 停留后淡出时长（毫秒）
   routeFadeMs: 4000
-  # 压测并发：同时用多少热连接发请求（冲地图脉冲）
-  stressConcurrency: 500
-  # 压测总请求数；null=按热池 IP 数与并发估算（约 max(hot*2, concurrency*2)）
-  stressTotal: 100000
-  # true：热池就绪后自动开跑一轮压测
-  stressOnStart: false
   # 网卡流量监视：网卡名；null=自动取默认路由网卡
   nicIface: null
   # 网卡流量采样间隔（毫秒），经 WS 推送上下行速率
   nicSampleMs: 1000
+  # 脉冲 WS 冲刷间隔（毫秒）：越小越接近连续流；压测中用此节奏推送而非合批跳频
+  pulseStreamMs: 16
+  # 单客户端 WS 发送缓冲上限（字节）；超过则丢弃本帧脉冲（淘汰积压旧数据，不撑爆前端）
+  wsMaxBufferedBytes: 1048576
+
+# ---------- 测试工具：热路径压测（npm run stress:hot → POST flight:map /api/stress；主页无 UI） ----------
+# 策略：低并发 + 完成即补位（高频泵）；软公平复用热连接；间歇严格公平保证慢/冷 IP 仍会打到
+stressTest:
+  # 同时 in-flight 上限；建议 32~128，勿用 300+（易把事件循环和慢槽拖死）
+  concurrency: 64
+  total: 100000
+  # null=用 rocktree + planetoidPath
+  url: null
+  waitHot: true
+  waitHotMs: 120000
+  # 压测单次超时（毫秒）：只释放被慢请求占住的并发槽；不把慢 IP 排除出选路
+  requestTimeoutMs: 3000

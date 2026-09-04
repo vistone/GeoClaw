@@ -23,6 +23,10 @@ import { FetchTaskPool } from "./FetchTaskPool.js";
 import type { FetchMetrics } from "./FetchMetrics.js";
 import { createFetchMetricsFromConfig, buildIpGeoRegistryFromConfig } from "./createFetchMetricsFromConfig.js";
 import {
+  createFetchExportSinkFromConfig,
+  FetchExportSink,
+} from "./FetchExportSink.js";
+import {
   createFetchRouteResolverFromConfig,
   FetchRouteResolver,
 } from "./FetchRouteResolver.js";
@@ -133,6 +137,8 @@ export type WebFetchOptions = {
   hotConnectionPool?: HotConnectionPool | false;
   /** Fetch 指标；false 关闭；省略时按 geoclaw.yaml fetchMetrics 段 */
   fetchMetrics?: FetchMetrics | false;
+  /** 出站原样 PUT；false 关闭；省略时按 geoclaw.yaml fetchExport 段 */
+  fetchExport?: FetchExportSink | false;
 };
 
 /**
@@ -152,6 +158,7 @@ export class WebFetch {
       hotConnectionPool?: HotConnectionPool;
       fetchTaskPool?: FetchTaskPool;
       fetchMetrics?: FetchMetrics;
+      fetchExport?: FetchExportSink;
       ipGeoRegistry?: IpGeoRegistry;
       warmPoolFallbackToHostPin: boolean;
       proxyMode: ProxyMode;
@@ -201,6 +208,10 @@ export class WebFetch {
       hotConnectionPool,
       fetchTaskPool,
       fetchMetrics,
+      fetchExport:
+        options.fetchExport === false
+          ? undefined
+          : (options.fetchExport ?? createFetchExportSinkFromConfig()),
       ipGeoRegistry: buildIpGeoRegistryFromConfig(),
       warmPoolFallbackToHostPin: cfg.getWarmPoolFallbackToHostPin(),
       proxyMode: options.proxyMode ?? cfg.getProxyMode(),
@@ -249,24 +260,9 @@ export class WebFetch {
           urlHostname === warmHostname;
 
         if (hotPool && hasDomainYaml) {
-          if (hotPool.getHotCount() > 0) {
+          // 热池为空时也走任务池：NoHotIp 会回队等重热，禁止在此直接抛错把压测记成失败
+          if (hotPool.getHotCount() > 0 || !this.options.warmPoolFallbackToHostPin) {
             return this.getBytesViaHotPool(url, getOptions, extraHeaders, browser, collectTls);
-          }
-          if (!this.options.warmPoolFallbackToHostPin) {
-            const requestId = this.options.fetchMetrics?.createRequestId() ?? "no-hot";
-            this.options.fetchMetrics?.onRequestStart(requestId, url);
-            this.options.fetchMetrics?.onAttempt(
-              requestId,
-              url,
-              1,
-              undefined,
-              { kind: "no_hot_ip" },
-              0,
-            );
-            this.options.fetchMetrics?.onRequestFailed(requestId);
-            throw new Error(
-              "HotConnectionPool: no hot connections — wait for background warmup (warmPool.autoStartWarmup) or run warm:kh-ips",
-            );
           }
         }
 
@@ -363,6 +359,8 @@ export class WebFetch {
           });
         }
 
+        await this.maybeExportBytes(buf);
+
         return {
           bytes: buf,
           trace,
@@ -390,6 +388,14 @@ export class WebFetch {
 
   getHotConnectionPool(): HotConnectionPool | undefined {
     return this.options.hotConnectionPool;
+  }
+
+  /**
+   * 获取热路径任务池。
+   * @returns 输出：`undefined | FetchTaskPool` — 未启用热池时为 undefined
+   */
+  getFetchTaskPool(): FetchTaskPool | undefined {
+    return this.options.fetchTaskPool;
   }
 
   /**
@@ -491,7 +497,20 @@ export class WebFetch {
       });
     }
 
+    await this.maybeExportBytes(buf);
+
     return { bytes: buf, trace, flightPath };
+  }
+
+  /**
+   * 进站成功后原样出站 PUT（未启用则跳过）。
+   * @param bytes - 输入：`Uint8Array` — 进站响应原始字节
+   * @returns 输出：`Promise<void>` — 无返回值
+   */
+  private async maybeExportBytes(bytes: Uint8Array): Promise<void> {
+    const sink = this.options.fetchExport;
+    if (!sink?.isActive()) return;
+    await sink.putRaw(bytes);
   }
 
   /**

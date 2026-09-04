@@ -5,7 +5,25 @@
 
 ## [未发布]
 
-（尚无条目。）
+## [0.0.22] - 2026-09-04
+
+### 新增
+
+- 本地国旗资源 `viz/flight-map/vendor/flags/w20`（306 国）；飞行地图不再请求 flagcdn
+- `fetchExport`：进站成功后原样 PUT 存档（独立 url/headers，与进站 fetch 分离）；`FetchExportSink`
+- IP 统计：请求瞬时/平均 RPS + 心跳波峰图（与网卡采样同节拍，对照下行波峰）
+- 测试脚本 `npm run stress:hot` + 配置段 `stressTest`（经 `flight:map` 的 `/api/stress` 驱动地图；主页无测试 UI）
+
+### 变更
+
+- `config/ip-stats/<域名>.yaml` 不存在时：启动扫描 `config/<域名>.yaml`（HostPin）建立零计数统计素材并立即落盘；首次访问同逻辑
+- IP 请求统计表格窗口列出全部种子 IP（零请求也显示，有请求排前）；国旗条按全部 IP 汇总国家
+- 热池运维与业务下载并发拆开：`warmPool.concurrency` / `warmPool.taskConcurrency`
+- 热池暂时为空时 `WebFetch` 走任务池回队；`fetch.timeoutMs` 默认 15000
+- 飞行地图主页去掉「测试工具」区块；压测默认 concurrency=64 高频补位；软公平 `warmSlack` 复用热连接 + 8% 全池探索（不闲置慢 IP）
+- 压测脉冲改为 `pulseStreamMs`（默认 16ms）连续冲刷，不再同 tick 合批跳频；已点亮线路只续命换色
+- 下载非 200：仅 403/429 入冷池；其余状态保留热连接并立即回队（`setImmediate`），不踢池、不同步重试占主线程
+- WS：客户端 `bufferedAmount` 超 `wsMaxBufferedBytes` 时丢弃本帧脉冲；Worker 合并 pulse/status 只保留最新，约 16ms 刷一次主线程
 
 ## [0.0.21] - 2026-09-04
 

@@ -110,6 +110,30 @@ export class FetchTaskPool {
   }
 
   /**
+   * 返回当前任务并发上限。
+   * @returns 输出：`number` — 并发 worker 上限
+   */
+  getConcurrency(): number {
+    return this.options.concurrency;
+  }
+
+  /**
+   * 调整任务并发上限并立即泵队列（压测对齐热连接数时用）。
+   * @param concurrency - 输入：`number` — 新的并发上限（至少为 1）
+   * @returns 输出：无（`void`）
+   */
+  setConcurrency(concurrency: number): void {
+    FetchTaskPool.logger.measureSync(
+      "setConcurrency",
+      () => {
+        this.options.concurrency = Math.max(1, Math.floor(concurrency) || 1);
+        this.pump();
+      },
+      { concurrency: this.options.concurrency },
+    );
+  }
+
+  /**
    * 启动 worker 消费队列。
    * @returns 输出：无（`void`）
    */
@@ -168,7 +192,7 @@ export class FetchTaskPool {
     } catch (err) {
       const durationMs = Date.now() - started;
       if (err instanceof HotFetchTimeoutError) {
-        // 超时不是错误：不记失败指标、不烧 attempts，直接回队换 IP
+        // 超时不是错误：不记失败指标、不烧 attempts；让出事件循环后再回队换 IP
         task.attempts = Math.max(0, task.attempts - 1);
         task.lastIp = err.ip;
         FetchTaskPool.logger.debug("请求超时，任务回队换 IP", {
@@ -176,7 +200,10 @@ export class FetchTaskPool {
           ip: err.ip,
           durationMs,
         });
-        this.queue.push(task);
+        setImmediate(() => {
+          this.queue.push(task);
+          this.pump();
+        });
         return;
       }
       if (err instanceof HotFetchNotOkError) {
@@ -217,7 +244,11 @@ export class FetchTaskPool {
           attempts: task.attempts,
           error: err instanceof Error ? err.message : String(err),
         });
-        this.queue.push(task);
+        // 让出主线程：不在本轮同步重试，下一拍由 pool 另选 IP
+        setImmediate(() => {
+          this.queue.push(task);
+          this.pump();
+        });
         return;
       }
 

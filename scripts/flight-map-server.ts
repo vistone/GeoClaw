@@ -41,6 +41,64 @@ const webFetch = createWebFetch();
 const ipGeo = buildIpGeoRegistryFromConfig();
 const nicSampler = new NicTrafficSampler(mapCfg.nicIface);
 
+/** 请求速率采样（与网卡同一节拍，供前端心跳波峰图） */
+let fetchRatePrev = {
+  submitted: 0,
+  succeeded: 0,
+  failed: 0,
+  at: Date.now(),
+};
+let fetchRateEwma = { submitted: 0, succeeded: 0, failed: 0 };
+
+/**
+ * 按 FetchMetrics 计数差分计算瞬时/指数平均 RPS。
+ */
+function sampleFetchRate(): {
+  rps: number;
+  rpsOk: number;
+  rpsFail: number;
+  avgRps: number;
+  avgRpsOk: number;
+  avgRpsFail: number;
+  inFlight: number;
+  submitted: number;
+  succeeded: number;
+  failed: number;
+} {
+  const snap = webFetch.getFetchMetrics()?.getSnapshot();
+  const now = Date.now();
+  const submitted = snap?.submitted ?? 0;
+  const succeeded = snap?.succeeded ?? 0;
+  const failed = snap?.failed ?? 0;
+  const inFlight = snap?.inFlight ?? 0;
+  const dtSec = Math.max(0.001, (now - fetchRatePrev.at) / 1000);
+  const dSub = Math.max(0, submitted - fetchRatePrev.submitted);
+  const dOk = Math.max(0, succeeded - fetchRatePrev.succeeded);
+  const dFail = Math.max(0, failed - fetchRatePrev.failed);
+  const rps = dSub / dtSec;
+  const rpsOk = dOk / dtSec;
+  const rpsFail = dFail / dtSec;
+  const alpha = 0.35;
+  fetchRateEwma = {
+    submitted: fetchRateEwma.submitted * (1 - alpha) + rps * alpha,
+    succeeded: fetchRateEwma.succeeded * (1 - alpha) + rpsOk * alpha,
+    failed: fetchRateEwma.failed * (1 - alpha) + rpsFail * alpha,
+  };
+  fetchRatePrev = { submitted, succeeded, failed, at: now };
+  return {
+    rps,
+    rpsOk,
+    rpsFail,
+    avgRps: fetchRateEwma.submitted,
+    avgRpsOk: fetchRateEwma.succeeded,
+    avgRpsFail: fetchRateEwma.failed,
+    inFlight,
+    submitted,
+    succeeded,
+    failed,
+  };
+}
+
 /** ipinfo 解析的客户端原点（异步缓存） */
 let cachedOrigin: FetchRouteOrigin | null = null;
 let originResolveInFlight: Promise<void> | null = null;
@@ -715,6 +773,19 @@ function broadcastJson(obj: unknown): void {
   }
 }
 
+/**
+ * 推送脉冲：客户端发送缓冲过大则跳过（淘汰积压，避免撑爆前端）。
+ */
+function broadcastPulseJson(obj: unknown): void {
+  const msg = JSON.stringify(obj);
+  const maxBuf = Math.max(0, mapCfg.wsMaxBufferedBytes ?? 1_048_576);
+  for (const client of wss.clients) {
+    if (client.readyState !== WebSocket.OPEN) continue;
+    if (maxBuf > 0 && client.bufferedAmount > maxBuf) continue;
+    client.send(msg);
+  }
+}
+
 function broadcastStatus(force = false): void {
   const payload = buildStatusPayload();
   const fp = statusFingerprint(payload);
@@ -744,7 +815,7 @@ function broadcastNewPulses(maxItems?: number): void {
   if (maxItems != null && payload.length > maxItems) {
     payload = payload.slice(-maxItems);
   }
-  broadcastJson({
+  broadcastPulseJson({
     type: "pulse",
     ts: Date.now(),
     items: payload,
@@ -754,7 +825,7 @@ function broadcastNewPulses(maxItems?: number): void {
 function tickBroadcast(): void {
   broadcastNewPulses();
   if (stressRunning) {
-    // 压测中仍推脉冲；状态/IP 由 runStress 自己推，避免重复扫
+    // 压测中状态/IP 由 runStress 节流推送，避免与泵抢扫
     return;
   }
   broadcastStatus(false);
@@ -783,26 +854,162 @@ async function runFetch(fetchUrl: string) {
 }
 
 let stressRunning = false;
-/** 压测中合并同一事件循环内的脉冲推送（只合并，不丢弃、不封顶） */
-let stressPulseFlushScheduled = false;
+let stressPulseTimer: ReturnType<typeof setInterval> | null = null;
 let stressLastProgressAt = 0;
+let stressLastIpStatsAt = 0;
+
+/** 压测期待推脉冲（按落点去重，避免每条请求建 FetchFlightPath） */
+const stressPulseByRoute = new Map<
+  string,
+  { id: string; ip: string; ms: number; st: number; b: number; via: "hot"; h2: boolean; city?: string; country?: string; path?: string }
+>();
+
+/** 压测期 IP 计数暂存，批量刷入 IpFetchStatsStore */
+const stressIpAgg = new Map<
+  string,
+  { ok: number; fail: number; bytes: number; durationSum: number }
+>();
+
+const stressCfg = cfg.getStressTestOptions();
+
+function stressBumpIp(ip: string, success: boolean, durationMs: number, bytes: number): void {
+  const cur = stressIpAgg.get(ip);
+  if (cur) {
+    if (success) cur.ok += 1;
+    else cur.fail += 1;
+    cur.bytes += bytes;
+    cur.durationSum += durationMs;
+  } else {
+    stressIpAgg.set(ip, {
+      ok: success ? 1 : 0,
+      fail: success ? 0 : 1,
+      bytes,
+      durationSum: durationMs,
+    });
+  }
+}
+
+function stressFlushIpAgg(hostname: string): void {
+  const store = webFetch.getFetchMetrics()?.getIpStatsStore();
+  if (!store || stressIpAgg.size === 0) return;
+  for (const [ip, a] of stressIpAgg) {
+    const geo = ipGeo.lookup(ip);
+    store.recordBatch({
+      hostname,
+      ip,
+      success: a.ok,
+      failed: a.fail,
+      durationSumMs: a.durationSum,
+      bytes: a.bytes,
+      city: geo?.city,
+      region: geo?.region,
+      country: geo?.country,
+      loc: geo?.loc,
+    });
+  }
+  stressIpAgg.clear();
+}
 
 /**
- * 高并发压测：经热池发请求，驱动前端脉冲。
+ * 压测极速路径：热池选路 + 读 body；软公平复用热连接，间歇探索保证全池都会打到。
  */
-async function runStress(opts: {
-  url?: string;
-  concurrency?: number;
-  total?: number;
-} = {}) {
+async function leanStressFetch(fetchUrl: string, pathHint: string | undefined): Promise<void> {
+  const hotPool = webFetch.getHotConnectionPool();
+  if (!hotPool) throw new Error("无热池");
+
+  const t0 = Date.now();
+  try {
+    const { response, ip, timings } = await hotPool.fetchOnce(fetchUrl, {}, {
+      timeoutMs: stressRequestTimeoutMs,
+      warmSlack: stressWarmSlack,
+      exploreRatio: stressExploreRatio,
+    });
+    const durationMs = Math.max(0, Math.round(timings?.wait ?? Date.now() - t0));
+    const buf = await response.arrayBuffer();
+    const bytes = buf.byteLength;
+
+    stressBumpIp(ip, true, durationMs, bytes);
+
+    const geo = ipGeo.lookup(ip);
+    const loc = parseLoc(geo?.loc);
+    const key = loc
+      ? `ll:${loc.lat.toFixed(4)},${loc.lng.toFixed(4)}`
+      : `ip:${ip}`;
+    stressSeq += 1;
+    stressPulseByRoute.set(key, {
+      id: `s-${stressSeq}-${ip}`,
+      ip,
+      ms: durationMs,
+      st: response.status,
+      b: bytes,
+      via: "hot",
+      h2: true,
+      ...(geo?.city ? { city: geo.city } : {}),
+      ...(geo?.country ? { country: geo.country } : {}),
+      ...(pathHint ? { path: pathHint } : {}),
+    });
+  } catch (err) {
+    const ip =
+      err && typeof err === "object" && "ip" in err
+        ? String((err as { ip?: string }).ip ?? "")
+        : "";
+    if (ip) {
+      stressBumpIp(ip, false, Date.now() - t0, 0);
+    }
+    throw err;
+  }
+}
+
+let stressSeq = 0;
+/** 压测单次超时（只释放并发槽，选路不排除慢 IP） */
+let stressRequestTimeoutMs = 3_000;
+/** 软公平带宽：带内优先复用热连接 */
+let stressWarmSlack = 64;
+/** 严格公平探索比例：保证落后/冷 IP 仍会被打到 */
+let stressExploreRatio = 0.08;
+
+
+function flushStressPulses(): void {
+  if (stressPulseByRoute.size === 0) return;
+  const items = [...stressPulseByRoute.values()];
+  stressPulseByRoute.clear();
+  broadcastPulseJson({
+    type: "pulse",
+    ts: Date.now(),
+    items,
+  });
+}
+
+/**
+ * 高并发压测：热池直打，尽量不碰 metrics/航线对象；地图靠稀疏脉冲点亮。
+ */
+async function runStress(
+  opts: {
+    url?: string;
+    concurrency?: number;
+    total?: number;
+  } = {},
+) {
   if (stressRunning) {
     return { ok: false as const, error: "压测已在进行中" };
   }
 
-  const fetchUrl = opts.url ?? mapCfg.demoFetchUrl;
+  const fetchUrl = opts.url ?? stressCfg.url ?? mapCfg.demoFetchUrl;
   if (!fetchUrl) {
     return { ok: false as const, error: "missing url" };
   }
+
+  let hostname = "";
+  let pathHint: string | undefined;
+  try {
+    const u = new URL(fetchUrl);
+    hostname = u.hostname.toLowerCase();
+    pathHint = `${u.pathname}${u.search}${u.hash}` || "/";
+  } catch {
+    return { ok: false as const, error: "invalid url" };
+  }
+
+  await ensureCachedOrigin();
 
   const hotPool = webFetch.getHotConnectionPool();
   if (!hotPool || hotPool.getHotCount() === 0) {
@@ -814,14 +1021,28 @@ async function runStress(opts: {
   }
 
   const hotCount = hotPool.getHotCount();
-  const concurrency = Math.max(1, opts.concurrency ?? mapCfg.stressConcurrency ?? 40);
-  const total = Math.max(
-    1,
-    opts.total ?? mapCfg.stressTotal ?? Math.max(hotCount * 2, concurrency * 2),
-  );
+  const concurrency = Math.max(1, opts.concurrency ?? stressCfg.concurrency);
+  const total = Math.max(1, opts.total ?? stressCfg.total);
 
   stressRunning = true;
   stressLastProgressAt = 0;
+  stressLastIpStatsAt = 0;
+  stressSeq = 0;
+  stressPulseByRoute.clear();
+  stressIpAgg.clear();
+
+  if (stressPulseTimer) clearInterval(stressPulseTimer);
+  // 压测期 100ms 推一帧去重脉冲；中途不刷 IP 表；保活/重热继续跑
+  const pulseMs = Math.max(100, mapCfg.pulseStreamMs);
+  stressPulseTimer = setInterval(() => {
+    flushStressPulses();
+  }, pulseMs);
+
+  // 低并发·高频补位；软公平复用热 TCP；间歇严格公平保证全池都会打到
+  stressRequestTimeoutMs = stressCfg.requestTimeoutMs;
+  stressWarmSlack = Math.max(concurrency, concurrency * 2);
+  stressExploreRatio = 0.08;
+
   broadcastJson({
     type: "stressStatus",
     ts: Date.now(),
@@ -835,27 +1056,25 @@ async function runStress(opts: {
     done: 0,
   });
 
-  console.log("高并发压测开始:", { concurrency, total, hotCount, url: fetchUrl });
+  console.log("压测开始（低并发高频·软公平复用·间歇全池探索）:", {
+    concurrency,
+    total,
+    hotCount,
+    requestTimeoutMs: stressRequestTimeoutMs,
+    warmSlack: stressWarmSlack,
+    exploreRatio: stressExploreRatio,
+    url: fetchUrl,
+  });
   const started = Date.now();
   let ok = 0;
   let fail = 0;
   let next = 0;
   let inFlight = 0;
 
-  /** 同 tick 内合并推送；推送全部新脉冲，不限流丢弃 */
-  const flushStressPulses = () => {
-    if (stressPulseFlushScheduled) return;
-    stressPulseFlushScheduled = true;
-    setImmediate(() => {
-      stressPulseFlushScheduled = false;
-      broadcastNewPulses();
-    });
-  };
-
   const maybeProgress = () => {
     const done = ok + fail;
     const now = Date.now();
-    if (done < total && now - stressLastProgressAt < 400) return;
+    if (done < total && now - stressLastProgressAt < 500) return;
     stressLastProgressAt = now;
     broadcastJson({
       type: "stressStatus",
@@ -870,45 +1089,42 @@ async function runStress(opts: {
       done,
       elapsedMs: now - started,
     });
-    pushIpStatsMetaToWatchers();
-    pushIpStatsToWatchers(false);
-    flushStressPulses();
   };
 
-  await new Promise<void>((resolve) => {
-    const pump = () => {
-      while (inFlight < concurrency && next < total) {
-        next += 1;
-        inFlight += 1;
-        void webFetch
-          .getBytesWithTrace(fetchUrl, { trace: false })
-          .then(() => {
-            ok += 1;
-          })
-          .catch(() => {
-            fail += 1;
-          })
-          .finally(() => {
-            inFlight -= 1;
-            flushStressPulses();
-            maybeProgress();
-            if (ok + fail >= total) resolve();
-            else if (inFlight < concurrency) pump();
-          });
-      }
-    };
-    // 分拍启动，避免一次同步拉起数百个任务堵住接收循环
-    const kick = () => {
+  try {
+    await new Promise<void>((resolve) => {
+      /** 有空槽就立刻补请求：低并发靠高频补位撑吞吐 */
+      const pump = () => {
+        while (inFlight < concurrency && next < total) {
+          next += 1;
+          inFlight += 1;
+          void leanStressFetch(fetchUrl, pathHint)
+            .then(() => {
+              ok += 1;
+            })
+            .catch(() => {
+              fail += 1;
+            })
+            .finally(() => {
+              inFlight -= 1;
+              maybeProgress();
+              if (ok + fail >= total) resolve();
+              else setImmediate(pump);
+            });
+        }
+      };
       pump();
-      if (ok + fail < total && inFlight < concurrency && next < total) {
-        setImmediate(kick);
-      }
-    };
-    kick();
-  });
+    });
+  } finally {
+    if (stressPulseTimer) {
+      clearInterval(stressPulseTimer);
+      stressPulseTimer = null;
+    }
+    stressRunning = false;
+  }
 
-  stressRunning = false;
-  broadcastNewPulses();
+  flushStressPulses();
+  stressFlushIpAgg(hostname);
   for (const client of wss.clients) {
     if (client.readyState !== WebSocket.OPEN) continue;
     const state = ipStatsClients.get(client);
@@ -1067,6 +1283,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // 测试入口：仅 API（主页无 UI）；npm run stress:hot 会打这里
     if (req.method === "POST" && url.pathname === "/api/stress") {
       const raw = await readBody(req);
       const body = JSON.parse(raw || "{}") as {
@@ -1093,7 +1310,7 @@ const server = createServer(async (req, res) => {
       sendJson(res, 202, {
         ok: true,
         accepted: true,
-        message: "压测已异步启动，进度/结果经 WebSocket 推送",
+        message: "压测已异步启动；进度经 WebSocket，地图会点亮航线",
       });
       return;
     }
@@ -1131,9 +1348,15 @@ wss.on("connection", (ws) => {
   lastStatusFingerprint = statusFingerprint(status);
   ws.send(JSON.stringify({ type: "poolStatus", ts: Date.now(), ...status }));
   const nicNow = nicSampler.sample();
-  if (nicNow) {
-    ws.send(JSON.stringify({ type: "nicTraffic", ...nicNow }));
-  }
+  const rateNow = sampleFetchRate();
+  ws.send(
+    JSON.stringify({
+      type: "nicTraffic",
+      ...(nicNow ?? {}),
+      ...rateNow,
+      ts: Date.now(),
+    }),
+  );
 
   ws.on("message", (raw) => {
     void (async () => {
@@ -1289,53 +1512,6 @@ wss.on("connection", (ws) => {
             });
           return;
         }
-        if (msg.type === "stress") {
-          ws.send(JSON.stringify({ type: "stressStatus", status: "accepted", ts: Date.now() }));
-          if (msg.url) {
-            try {
-              const h = new URL(msg.url).hostname.toLowerCase();
-              const prev = ipStatsClients.get(ws);
-              const sameHost = prev?.hostname === h;
-              ipStatsClients.set(ws, {
-                hostname: h,
-                limit: prev?.limit ?? 0,
-                needFull: !sameHost,
-                revision: sameHost ? (prev?.revision ?? -1) : -1,
-                summaryRevision: sameHost ? (prev?.summaryRevision ?? -1) : -1,
-                lastSent: sameHost ? (prev?.lastSent ?? new Map()) : new Map(),
-                visibleIps: sameHost ? (prev?.visibleIps ?? new Set()) : new Set(),
-                windowStart: sameHost ? (prev?.windowStart ?? 0) : 0,
-                windowCount: sameHost ? (prev?.windowCount ?? 24) : 24,
-                countryFilter: sameHost ? (prev?.countryFilter ?? null) : null,
-              });
-            } catch {
-              /* ignore */
-            }
-          }
-          void runStress({
-            url: msg.url,
-            concurrency: msg.concurrency,
-            total: msg.total,
-          })
-            .then((result) => {
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: "stressResult", ...result }));
-                sendIpStatsToClient(ws, false);
-              }
-            })
-            .catch((err) => {
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(
-                  JSON.stringify({
-                    type: "stressResult",
-                    ok: false,
-                    error: err instanceof Error ? err.message : String(err),
-                  }),
-                );
-              }
-            });
-          return;
-        }
       } catch (err) {
         ws.send(
           JSON.stringify({
@@ -1354,11 +1530,16 @@ setInterval(() => {
   else tickBroadcast();
 }, 400);
 
-/** 本机网卡上下行速率（全连接广播） */
+/** 本机网卡上下行速率 + 请求 RPS（全连接广播） */
 setInterval(() => {
   const sample = nicSampler.sample();
-  if (!sample) return;
-  broadcastJson({ type: "nicTraffic", ...sample });
+  const rate = sampleFetchRate();
+  broadcastJson({
+    type: "nicTraffic",
+    ...(sample ?? {}),
+    ...rate,
+    ts: Date.now(),
+  });
 }, Math.max(1, mapCfg.nicSampleMs));
 
 server.listen(mapCfg.port, mapCfg.host, () => {
@@ -1414,21 +1595,6 @@ server.listen(mapCfg.port, mapCfg.host, () => {
       } catch (e) {
         console.error("演示 Fetch 失败:", e instanceof Error ? e.message : e);
       }
-    }
-
-    if (mapCfg.stressOnStart) {
-      const pool = webFetch.getHotConnectionPool();
-      // 有热连接即可开压测，不设「至少 N 条」门槛
-      for (let i = 0; i < 90; i++) {
-        if (pool && pool.getHotCount() > 0) break;
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-      if (!pool || pool.getHotCount() === 0) {
-        console.error("压测跳过: 热池仍无存活 IP");
-        return;
-      }
-      await new Promise((r) => setTimeout(r, 3000));
-      void runStress({});
     }
   })();
 });

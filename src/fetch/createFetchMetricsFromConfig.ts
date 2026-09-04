@@ -1,10 +1,14 @@
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { GeoClawConfig } from "../core/GeoClawConfig.js";
 import { FetchMetrics, type FetchMetricsOptions } from "./FetchMetrics.js";
 import { loadHostPinRecordsFromYaml } from "./HostPinPool.js";
-import { IpFetchStatsStore, type IpFetchStatsSeedIp } from "./IpFetchStatsStore.js";
+import {
+  IpFetchStatsStore,
+  normalizeHostname,
+  type IpFetchStatsSeedIp,
+} from "./IpFetchStatsStore.js";
 import { IpGeoRegistry } from "./IpGeoRegistry.js";
 
 /**
@@ -47,17 +51,45 @@ export function createIpFetchStatsStoreFromConfig(
   if (!rel) return undefined;
 
   const dirPath = GeoClawConfig.resolvePath(rel);
-  const seedForHostname =
-    opts.ipStatsSeedFromHostPin === false
-      ? undefined
-      : (hostname: string): ReadonlyArray<IpFetchStatsSeedIp> | undefined =>
-          seedIpsForHostname(hostname);
+  const seedEnabled = opts.ipStatsSeedFromHostPin !== false;
+  const seedForHostname = seedEnabled
+    ? (hostname: string): ReadonlyArray<IpFetchStatsSeedIp> | undefined =>
+        seedIpsForHostname(hostname)
+    : undefined;
 
-  return new IpFetchStatsStore({
+  const store = new IpFetchStatsStore({
     dirPath,
     flushIntervalMs: opts.ipStatsFlushIntervalMs ?? 5_000,
     seedForHostname,
   });
+  if (seedEnabled) {
+    store.materializeMissingFromSeeds(listHostPinYamlHostnames());
+  }
+  return store;
+}
+
+/**
+ * 列出 `hostPin.configDir` 下可作为 HostPin 素材的域名（文件名含点）。
+ * @returns 输出：`string[]` — 规范化主机名；另含 `hostPin.hostname`
+ */
+function listHostPinYamlHostnames(): string[] {
+  const cfg = GeoClawConfig.get();
+  const hostPin = cfg.getRaw().hostPin;
+  const configDir = GeoClawConfig.resolvePath(hostPin.configDir ?? "config");
+  const found = new Set<string>();
+  if (existsSync(configDir)) {
+    for (const name of readdirSync(configDir)) {
+      if (!/\.ya?ml$/i.test(name)) continue;
+      const stem = name.replace(/\.ya?ml$/i, "");
+      // 排除 geoclaw.yaml 等非域名文件（域名素材须含「.」）
+      if (!stem.includes(".")) continue;
+      const host = normalizeHostname(stem);
+      if (host) found.add(host);
+    }
+  }
+  const pinned = normalizeHostname(hostPin.hostname ?? "");
+  if (pinned) found.add(pinned);
+  return [...found];
 }
 
 /**

@@ -47,6 +47,7 @@ warmPool:
   successStatus: 200
   autoStartWarmup: false
   concurrency: 2
+  taskConcurrency: 5
   reheatIntervalMs: 5000
   backoffMs: 0
   fallbackToHostPin: true
@@ -63,6 +64,16 @@ fetchMetrics:
   ipStatsDir: null
   ipStatsFlushIntervalMs: 0
   ipStatsSeedFromHostPin: false
+
+fetchExport:
+  enabled: false
+  method: PUT
+  url: null
+  headers:
+    Content-Type: application/octet-stream
+  timeoutMs: 5000
+  proxyMode: never
+  failOpen: true
 
 fetchRoute:
   originMode: manual
@@ -102,6 +113,15 @@ flightMap:
   routeDrawMs: 1400
   routeHoldMs: 500
   routeFadeMs: 2800
-  stressConcurrency: 5
-  stressTotal: null
-  stressOnStart: false
+  nicIface: null
+  nicSampleMs: 1000
+  pulseStreamMs: 16
+  wsMaxBufferedBytes: 1048576
+
+stressTest:
+  concurrency: 5
+  total: 20
+  url: null
+  waitHot: false
+  waitHotMs: 5000
+  requestTimeoutMs: 3000

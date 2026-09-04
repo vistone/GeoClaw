@@ -39,6 +39,35 @@ test("pickFairHotIp 优先参与少的，同次数选更久未用", () => {
   assert.equal(picked, "idle-older");
 });
 
+test("pickFairHotIp warmSlack 同带内优先最近用过，落后仍会入选", () => {
+  const now = 100_000;
+  const warm = pickFairHotIp(
+    [
+      { ip: "lag", lastUsedAt: now - 80_000, assignCount: 0 },
+      { ip: "hot", lastUsedAt: now - 100, assignCount: 1 },
+      { ip: "hot2", lastUsedAt: now - 200, assignCount: 1 },
+    ],
+    now,
+    60_000,
+    { warmSlack: 2 },
+  );
+  // min=0，lag 必须先补
+  assert.equal(warm, "lag");
+
+  const reuse = pickFairHotIp(
+    [
+      { ip: "a", lastUsedAt: now - 50_000, assignCount: 5 },
+      { ip: "b", lastUsedAt: now - 100, assignCount: 5 },
+      { ip: "c", lastUsedAt: now - 10_000, assignCount: 6 },
+    ],
+    now,
+    60_000,
+    { warmSlack: 2 },
+  );
+  // 同为最低 assignCount=5 时优先最近用过的 b
+  assert.equal(reuse, "b");
+});
+
 test("isEofOrTimeoutError 识别超时与 EOF", () => {
   assert.equal(isEofOrTimeoutError(new Error("operation timed out")), true);
   assert.equal(isEofOrTimeoutError(new Error("unexpected EOF")), true);

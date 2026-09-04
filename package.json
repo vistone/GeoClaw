@@ -1,6 +1,6 @@
 {
   "name": "geoclaw",
-  "version": "0.0.21",
+  "version": "0.0.22",
   "private": true,
   "type": "module",
   "description": "RockTree / GlobeTrotter protobuf codecs for Node",
@@ -32,6 +32,7 @@
     "inspect:fetch": "tsx scripts/inspect-fetch.ts",
     "benchmark:kh-ips": "tsx scripts/benchmark-kh-ips.ts",
     "warm:kh-ips": "tsx scripts/warm-kh-ips.ts",
+    "stress:hot": "tsx scripts/stress-hot-fetch.ts",
     "fetch:stats": "tsx scripts/fetch-stats.ts",
     "flight:map": "tsx scripts/flight-map-server.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",

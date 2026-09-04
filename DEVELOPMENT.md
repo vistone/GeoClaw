@@ -160,8 +160,10 @@ flowchart BT
 | `tls.*` | node-wreq browser profile |
 | `proxy.*` | SOCKS5/HTTP 代理 URL 与 `auto/always/never` |
 | `hostPin.*` | HostPin 域名、IP 列表 YAML、地址族 |
-| `warmPool.*` | 热/冷池并发、空闲超时、任务池 |
+| `warmPool.*` | 热池运维：`concurrency`=预热/重热/保活；`taskConcurrency`=业务下载任务池 |
+| `stressTest.*` | 测试脚本 `npm run stress:hot` 专用（与 `flight:map` 主服务无关） |
 | `fetchMetrics.*` | 指标缓冲与 IP 统计落盘 |
+| `fetchExport.*` | 进站成功后原样 PUT 出站存档（url/headers 与进站分离） |
 | `fetchRoute.*` / `ipinfo.*` | 航线 origin 与 ipinfo |
 | `flightMap.*` | 飞行地图服务与弧显示参数 |
 | `benchmark.*` | `benchmark:kh-ips` 脚本默认值 |

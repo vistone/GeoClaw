@@ -81,9 +81,6 @@ const IDLE_ROUTE_ALPHA = 0.28;
 /** @type {object[]} */
 let recentPulsePaths = [];
 
-/** 压测进行中：避免 poolStatus / 普通脉冲文案盖掉进度 */
-let stressActive = false;
-
 let didInitialFit = false;
 let animRunning = false;
 
@@ -702,17 +699,23 @@ function activatePulseItems(items) {
     const ok = Number.isFinite(status) && status >= 200 && status < 300;
     const visual = visualFromIp(ip, config);
     const color = ok ? visual.color : "#ef4444";
+    // 同批内错开相位，避免一帧齐刷跳频
+    const staggerMs = changed * 12;
 
     const existing = pulses.get(key);
     if (existing) {
-      // 预绘骨架上激活：只换 IP 色并重启动画
       existing.id = id;
       existing.color = color;
-      existing.bornAt = now;
       existing.drawMs = timing.drawMs;
       existing.holdMs = timing.holdMs;
       existing.fadeMs = timing.fadeMs;
       existing.pinnedIp = ip;
+      if (existing.active) {
+        // 已点亮：只续命到 hold 段，不重头播绘线
+        existing.bornAt = now - timing.drawMs - staggerMs;
+      } else {
+        existing.bornAt = now - staggerMs;
+      }
       existing.active = true;
       changed += 1;
     } else {
@@ -735,7 +738,7 @@ function activatePulseItems(items) {
         color,
         idleColor: IDLE_ROUTE_COLOR,
         latlngs,
-        bornAt: now,
+        bornAt: now - staggerMs,
         drawMs: timing.drawMs,
         holdMs: timing.holdMs,
         fadeMs: timing.fadeMs,
@@ -830,11 +833,6 @@ function ensureWorkers() {
     }
     if (msg.type === "wsClose") {
       wsConnected = false;
-      if (stressActive) {
-        stressActive = false;
-        const btn = document.getElementById("btn-stress");
-        if (btn) btn.disabled = false;
-      }
       setStatus("WebSocket 断开，重连中…");
       return;
     }
@@ -880,9 +878,8 @@ function handleFlightWsMessage(msg) {
         label: msg.origin.label,
       };
     }
-    renderStats(msg.stats);
     renderHotStats(msg.hotCount);
-    if (!stressActive) {
+    {
       const activeN = [...pulses.values()].filter((p) => p.active).length;
       setStatus(`WS · 热池 ${msg.hotCount ?? 0} · 航线 ${pulses.size} · 点亮 ${activeN}`);
     }
@@ -910,7 +907,7 @@ function handleFlightWsMessage(msg) {
             },
       ),
     );
-    if (!stressActive) {
+    {
       const activeN = [...pulses.values()].filter((p) => p.active).length;
       setStatus(`点亮 +${n} · 航线 ${pulses.size} · 激活中 ${activeN}`);
     }
@@ -918,50 +915,10 @@ function handleFlightWsMessage(msg) {
   }
 
   if (msg.type === "routeList" || msg.type === "flightPaths") {
-    if (msg.stats) renderStats(msg.stats);
     if (msg.hotCount != null) renderHotStats(msg.hotCount);
     return;
   }
 
-  if (msg.type === "stressStatus") {
-    const btn = document.getElementById("btn-stress");
-    if (msg.status === "accepted") {
-      stressActive = true;
-      if (btn) btn.disabled = true;
-      setStatus("高并发压测已受理，正在拉起…");
-    } else if (msg.status === "running") {
-      stressActive = true;
-      if (btn) btn.disabled = true;
-      const done = msg.done ?? (msg.succeeded ?? 0) + (msg.failed ?? 0);
-      const total = msg.total ?? "?";
-      const elapsed =
-        msg.elapsedMs != null ? ` · ${Math.round(msg.elapsedMs / 1000)}s` : "";
-      setStatus(
-        `高并发压测中… ${done}/${total}（成 ${msg.succeeded ?? 0} / 败 ${msg.failed ?? 0}）· 并发 ${msg.concurrency ?? "?"} · 热池 ${msg.hotCount ?? "?"}${elapsed}`,
-      );
-    } else if (msg.status === "done") {
-      stressActive = false;
-      if (btn) btn.disabled = false;
-      setStatus(
-        `压测完成 成功 ${msg.succeeded}/${msg.total} · 失败 ${msg.failed} · ${msg.elapsedMs} ms`,
-      );
-    }
-    return;
-  }
-
-  if (msg.type === "stressResult") {
-    stressActive = false;
-    const btn = document.getElementById("btn-stress");
-    if (btn) btn.disabled = false;
-    if (msg.ok) {
-      setStatus(
-        `压测完成 成功 ${msg.succeeded}/${msg.total} · 失败 ${msg.failed} · ${msg.elapsedMs} ms`,
-      );
-    } else {
-      setStatus(`压测失败: ${msg.error ?? "unknown"}`);
-    }
-    return;
-  }
 
   if (msg.type === "fetchStatus") {
     setStatus(`Fetch 进行中… ${msg.url ?? ""}`);
@@ -969,8 +926,6 @@ function handleFlightWsMessage(msg) {
   }
 
   if (msg.type === "fetchResult") {
-    const btn = document.getElementById("btn-fetch");
-    if (btn) btn.disabled = false;
     if (msg.ok) {
       setStatus(
         `完成 ${msg.flightPath?.totalDurationMs ?? msg.elapsedMs ?? "?"} ms · IP ${msg.trace?.pinnedIp ?? msg.flightPath?.pinnedIp ?? "?"}`,
@@ -995,19 +950,6 @@ function handleFlightWsMessage(msg) {
   }
 }
 
-function renderStats(stats) {
-  const el = document.getElementById("test-stats");
-  if (!el) return;
-  if (!stats) {
-    el.innerHTML = "";
-    return;
-  }
-  el.innerHTML = `
-    <div>请求 ${stats.submitted} · 成功 ${stats.succeeded} · 失败 ${stats.failed} · 进行中 ${stats.inFlight ?? 0}</div>
-    <div class="legend">灰线=落点骨架 · 彩色=该落点被请求点亮 · 超时淡回灰</div>
-  `;
-}
-
 function renderHotStats(hotCount) {
   const el = document.getElementById("hot-stats");
   if (!el) return;
@@ -1029,8 +971,7 @@ let routeListManualOrder = [];
 const IP_STATS_WATCH_LIMIT = 0;
 
 function currentRequestHostname() {
-  const input = /** @type {HTMLInputElement | null} */ (document.getElementById("fetch-url"));
-  const raw = (input?.value || config.demoFetchUrl || "").trim();
+  const raw = String(config.demoFetchUrl || "").trim();
   if (!raw) return "";
   try {
     return new URL(raw).hostname.toLowerCase();
@@ -1155,6 +1096,19 @@ function countryDisplayName(code) {
 }
 
 /**
+ * 本地国旗 PNG（vendor/flags/w20）；未知码返回空串。
+ * @param {string} code
+ * @returns {string}
+ */
+function localFlagSrc(code) {
+  const cc = String(code ?? "")
+    .trim()
+    .toLowerCase();
+  if (!/^[a-z]{2}$/.test(cc)) return "";
+  return `/vendor/flags/w20/${cc}.png`;
+}
+
+/**
  * @param {string} code
  */
 function setIpStatsCountryFilter(code) {
@@ -1206,7 +1160,7 @@ function renderCountryFlags(list) {
         `<button type="button" class="ip-flag-btn ip-flag-unknown${active}" data-country="ZZ" title="${escapeHtml(tip)}">?</button>`,
       );
     } else {
-      const src = `https://flagcdn.com/w20/${code.toLowerCase()}.png`;
+      const src = localFlagSrc(code);
       parts.push(
         `<button type="button" class="ip-flag-btn${active}" data-country="${escapeHtml(code)}" title="${escapeHtml(tip)}"><img src="${src}" alt="${escapeHtml(code)}" width="20" height="14" loading="lazy" decoding="async" /></button>`,
       );
@@ -1908,10 +1862,11 @@ function focusIpOnMap(row, rowEl) {
   const place = [city, cc === "ZZ" ? "" : countryName].filter(Boolean).join(", ") || "—";
   const family = row.family ?? (ip.includes(":") ? "ipv6" : "ipv4");
   const familyLabel = family === "ipv6" ? "IPv6" : "IPv4";
+  const flagSrc = localFlagSrc(cc);
   const flagHtml =
-    cc === "ZZ"
+    cc === "ZZ" || !flagSrc
       ? `<span class="ip-focus-flag ip-focus-flag-unknown" title="未知">?</span>`
-      : `<img class="ip-focus-flag" src="https://flagcdn.com/w20/${cc.toLowerCase()}.png" alt="${escapeHtml(cc)}" title="${escapeHtml(countryName)}（${escapeHtml(cc)}）" width="20" height="14" loading="lazy" decoding="async" />`;
+      : `<img class="ip-focus-flag" src="${flagSrc}" alt="${escapeHtml(cc)}" title="${escapeHtml(countryName)}（${escapeHtml(cc)}）" width="20" height="14" loading="lazy" decoding="async" />`;
 
   if (!ipFocusLayer) {
     ipFocusLayer = L.layerGroup().addTo(map);
@@ -1999,33 +1954,222 @@ function formatBitRate(bps) {
 let nicSessionBase = null;
 
 /**
- * 应用本机网卡采样：速率来自服务端差分；累计=相对本页首个样本。
+ * 应用本机网卡采样 + 请求 RPS：速率来自服务端差分；累计=相对本页首个样本。
  * @param {{
  *   iface?: string;
  *   rxBytes?: number;
  *   txBytes?: number;
  *   rxBps?: number;
  *   txBps?: number;
+ *   rps?: number;
+ *   rpsOk?: number;
+ *   rpsFail?: number;
+ *   avgRps?: number;
+ *   avgRpsOk?: number;
+ *   avgRpsFail?: number;
+ *   inFlight?: number;
  * }} msg
  */
 function applyNicTraffic(msg) {
   const el = document.getElementById("nic-meta-line");
-  if (!el) return;
-  const iface = String(msg.iface ?? "").trim();
-  const rxBytes = Number(msg.rxBytes);
-  const txBytes = Number(msg.txBytes);
-  if (!iface || !Number.isFinite(rxBytes) || !Number.isFinite(txBytes)) {
-    el.textContent = "—";
-    return;
+  if (el) {
+    const iface = String(msg.iface ?? "").trim();
+    const rxBytes = Number(msg.rxBytes);
+    const txBytes = Number(msg.txBytes);
+    if (!iface || !Number.isFinite(rxBytes) || !Number.isFinite(txBytes)) {
+      el.textContent = "—";
+    } else {
+      if (!nicSessionBase) {
+        nicSessionBase = { rx: rxBytes, tx: txBytes };
+      }
+      const rxRate = formatBitRate(Number(msg.rxBps) || 0);
+      const txRate = formatBitRate(Number(msg.txBps) || 0);
+      const rxSess = formatBytes(Math.max(0, rxBytes - nicSessionBase.rx));
+      const txSess = formatBytes(Math.max(0, txBytes - nicSessionBase.tx));
+      el.textContent = `${iface} · ↓${rxRate} (${rxSess}) · ↑${txRate} (${txSess})`;
+    }
   }
-  if (!nicSessionBase) {
-    nicSessionBase = { rx: rxBytes, tx: txBytes };
+  pushReqHeartbeatSample(msg);
+}
+
+/** @type {{ rps: number; rpsOk: number; rxBps: number; ts: number }[]} */
+const reqHeartbeatSamples = [];
+const REQ_HEARTBEAT_MAX = 90;
+let reqHeartbeatPeakRps = 0;
+
+/**
+ * @param {{
+ *   rps?: number;
+ *   rpsOk?: number;
+ *   rpsFail?: number;
+ *   avgRps?: number;
+ *   avgRpsOk?: number;
+ *   avgRpsFail?: number;
+ *   inFlight?: number;
+ *   rxBps?: number;
+ * }} msg
+ */
+function pushReqHeartbeatSample(msg) {
+  const rps = Number(msg.rps);
+  const rpsOk = Number(msg.rpsOk);
+  const avgRps = Number(msg.avgRps);
+  const avgRpsOk = Number(msg.avgRpsOk);
+  const rpsFail = Number(msg.rpsFail);
+  const avgRpsFail = Number(msg.avgRpsFail);
+  const inFlight = Number(msg.inFlight);
+  const rxBps = Number(msg.rxBps) || 0;
+  const hasRate = Number.isFinite(rps) || Number.isFinite(avgRps);
+  if (hasRate) {
+    const instant = Number.isFinite(rps) ? Math.max(0, rps) : 0;
+    const okInstant = Number.isFinite(rpsOk) ? Math.max(0, rpsOk) : 0;
+    reqHeartbeatSamples.push({
+      rps: instant,
+      rpsOk: okInstant,
+      rxBps: Math.max(0, rxBps),
+      ts: Date.now(),
+    });
+    while (reqHeartbeatSamples.length > REQ_HEARTBEAT_MAX) {
+      reqHeartbeatSamples.shift();
+    }
+    if (instant > reqHeartbeatPeakRps) reqHeartbeatPeakRps = instant;
   }
-  const rxRate = formatBitRate(Number(msg.rxBps) || 0);
-  const txRate = formatBitRate(Number(msg.txBps) || 0);
-  const rxSess = formatBytes(Math.max(0, rxBytes - nicSessionBase.rx));
-  const txSess = formatBytes(Math.max(0, txBytes - nicSessionBase.tx));
-  el.textContent = `${iface} · ↓${rxRate} (${rxSess}) · ↑${txRate} (${txSess})`;
+
+  const rpsEl = document.getElementById("rps-meta-line");
+  if (rpsEl && hasRate) {
+    const avg = Number.isFinite(avgRps) ? avgRps : 0;
+    const avgOk = Number.isFinite(avgRpsOk) ? avgRpsOk : 0;
+    const failAvg = Number.isFinite(avgRpsFail) ? avgRpsFail : Number.isFinite(rpsFail) ? rpsFail : 0;
+    const now = Number.isFinite(rps) ? rps : 0;
+    const flight = Number.isFinite(inFlight) ? inFlight : 0;
+    rpsEl.textContent = `瞬时 ${formatRps(now)} · 平均 ${formatRps(avg)} · 成功均 ${formatRps(avgOk)} · 失败均 ${formatRps(failAvg)} · 进行中 ${flight}`;
+  }
+
+  drawReqHeartbeat();
+  const cap = document.getElementById("req-heartbeat-caption");
+  if (cap && hasRate) {
+    const peak = reqHeartbeatPeakRps;
+    const last = reqHeartbeatSamples[reqHeartbeatSamples.length - 1];
+    cap.textContent = `心跳波峰 · 窗口 ${reqHeartbeatSamples.length} 点 · 本窗峰值 ${formatRps(peak)} · 当前 ${formatRps(last?.rps ?? 0)}（青=提交 RPS，琥珀=成功 RPS，灰底=网卡下行相对峰）`;
+  }
+}
+
+/** @param {number} n */
+function formatRps(n) {
+  if (!Number.isFinite(n) || n < 0) return "0/s";
+  if (n >= 1000) return `${(n / 1000).toFixed(2)}k/s`;
+  if (n >= 100) return `${n.toFixed(0)}/s`;
+  if (n >= 10) return `${n.toFixed(1)}/s`;
+  return `${n.toFixed(2)}/s`;
+}
+
+function drawReqHeartbeat() {
+  const canvas = document.getElementById("req-heartbeat-canvas");
+  if (!(canvas instanceof HTMLCanvasElement)) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth || 320;
+  const cssH = 72;
+  const w = Math.max(1, Math.floor(cssW * dpr));
+  const h = Math.max(1, Math.floor(cssH * dpr));
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#020617";
+  ctx.fillRect(0, 0, w, h);
+
+  // 基线与网格
+  ctx.strokeStyle = "rgba(51, 65, 85, 0.55)";
+  ctx.lineWidth = 1 * dpr;
+  for (let i = 1; i < 4; i++) {
+    const y = (h * i) / 4;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+  const midY = h * 0.72;
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.35)";
+  ctx.beginPath();
+  ctx.moveTo(0, midY);
+  ctx.lineTo(w, midY);
+  ctx.stroke();
+
+  if (reqHeartbeatSamples.length < 2) return;
+
+  let maxRps = 1;
+  let maxRx = 1;
+  for (const s of reqHeartbeatSamples) {
+    if (s.rps > maxRps) maxRps = s.rps;
+    if (s.rpsOk > maxRps) maxRps = s.rpsOk;
+    if (s.rxBps > maxRx) maxRx = s.rxBps;
+  }
+  // 峰值略留顶空，心跳尖峰更明显
+  maxRps *= 1.15;
+  maxRx *= 1.15;
+
+  const n = reqHeartbeatSamples.length;
+  const xAt = (i) => (i / (n - 1)) * w;
+  const yRps = (v) => midY - (Math.max(0, v) / maxRps) * (midY - 6 * dpr);
+  const yRx = (v) => midY - (Math.max(0, v) / maxRx) * (midY - 6 * dpr) * 0.55;
+
+  // 网卡下行相对幅度（灰填充，对照波峰）
+  ctx.beginPath();
+  ctx.moveTo(xAt(0), midY);
+  for (let i = 0; i < n; i++) {
+    ctx.lineTo(xAt(i), yRx(reqHeartbeatSamples[i].rxBps));
+  }
+  ctx.lineTo(xAt(n - 1), midY);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(100, 116, 139, 0.22)";
+  ctx.fill();
+
+  // 成功 RPS（琥珀）
+  strokeHeartbeatSeries(ctx, reqHeartbeatSamples, "rpsOk", xAt, yRps, dpr, "#f59e0b", 1.5);
+
+  // 提交 RPS（青，主心跳）
+  strokeHeartbeatSeries(ctx, reqHeartbeatSamples, "rps", xAt, yRps, dpr, "#22d3ee", 2.2);
+
+  // 最新点脉冲点
+  const last = reqHeartbeatSamples[n - 1];
+  const lx = xAt(n - 1);
+  const ly = yRps(last.rps);
+  ctx.beginPath();
+  ctx.arc(lx, ly, 3.2 * dpr, 0, Math.PI * 2);
+  ctx.fillStyle = "#67e8f9";
+  ctx.fill();
+}
+
+/**
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {{ rps: number; rpsOk: number; rxBps: number }[]} samples
+ * @param {"rps" | "rpsOk"} key
+ * @param {(i: number) => number} xAt
+ * @param {(v: number) => number} yAt
+ * @param {number} dpr
+ * @param {string} color
+ * @param {number} width
+ */
+function strokeHeartbeatSeries(ctx, samples, key, xAt, yAt, dpr, color, width) {
+  ctx.beginPath();
+  for (let i = 0; i < samples.length; i++) {
+    const x = xAt(i);
+    const y = yAt(samples[i][key]);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width * dpr;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 6 * dpr;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
 }
 
 function renderRouteList(paths) {
@@ -2064,10 +2208,11 @@ function renderRouteList(paths) {
     const countryName = countryDisplayName(cc);
     const city = p.targetCity ?? p.targetLabel;
     const place = [cc === "ZZ" ? "" : countryName, city].filter(Boolean).join(" · ");
+    const flagSrc = localFlagSrc(cc);
     const flagHtml =
-      cc === "ZZ"
+      cc === "ZZ" || !flagSrc
         ? `<span class="route-flag route-flag-unknown" title="未知">?</span>`
-        : `<img class="route-flag" src="https://flagcdn.com/w20/${cc.toLowerCase()}.png" alt="${escapeHtml(cc)}" title="${escapeHtml(countryName)}（${escapeHtml(cc)}）" width="20" height="14" loading="lazy" decoding="async" />`;
+        : `<img class="route-flag" src="${flagSrc}" alt="${escapeHtml(cc)}" title="${escapeHtml(countryName)}（${escapeHtml(cc)}）" width="20" height="14" loading="lazy" decoding="async" />`;
     const pathLine = p.requestPath
       ? `<div class="path" title="${escapeHtml(String(p.requestPath))}">${escapeHtml(String(p.requestPath))}</div>`
       : "";
@@ -2109,86 +2254,10 @@ function orderRoutePaths(paths) {
   return [...fresh, ...orderedOld, ...byId.values()];
 }
 
-async function triggerFetch() {
-  const input = /** @type {HTMLInputElement} */ (document.getElementById("fetch-url"));
-  const url = input.value.trim();
-  if (!url) {
-    setStatus("请填写 URL");
-    return;
-  }
-  const btn = document.getElementById("btn-fetch");
-  btn.disabled = true;
-  setStatus("Fetch 进行中…");
-
-  if (wsConnected) {
-    wsSend({ type: "fetch", url });
-    // 结果经 WS fetchResult 回来，不堵主线程
-    return;
-  }
-
-  try {
-    const res = await fetch("/api/fetch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    });
-    const data = await res.json();
-    if (!res.ok && res.status !== 202) throw new Error(data.error ?? res.statusText);
-    if (res.status === 202) {
-      setStatus("Fetch 已异步提交，等待结果…");
-      return;
-    }
-    setStatus(`完成 ${data.flightPath?.totalDurationMs ?? "?"} ms`);
-  } catch (err) {
-    setStatus(`Fetch 失败: ${err instanceof Error ? err.message : String(err)}`);
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-async function triggerStress() {
-  const input = /** @type {HTMLInputElement} */ (document.getElementById("fetch-url"));
-  const url = input.value.trim() || config.demoFetchUrl || undefined;
-  const btn = document.getElementById("btn-stress");
-  btn.disabled = true;
-  stressActive = true;
-  setStatus("高并发压测启动中…");
-
-  if (wsConnected) {
-    wsSend({ type: "stress", url });
-    // 进度/结果经 WS stressStatus / stressResult
-    return;
-  }
-
-  try {
-    const res = await fetch("/api/stress", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    });
-    const data = await res.json();
-    if (!res.ok && res.status !== 202) throw new Error(data.error ?? res.statusText);
-    if (res.status === 202) {
-      setStatus("压测已异步启动，进度见状态栏（需保持 WS）…");
-      // 按钮保持禁用，等 stressStatus done / stressResult
-      return;
-    }
-    stressActive = false;
-    setStatus(
-      `压测完成 成功 ${data.succeeded}/${data.total} · 失败 ${data.failed} · ${data.elapsedMs} ms`,
-    );
-    btn.disabled = false;
-  } catch (err) {
-    stressActive = false;
-    setStatus(`压测失败: ${err instanceof Error ? err.message : String(err)}`);
-    btn.disabled = false;
-  }
-}
-
 async function triggerResetIpStats() {
   const hostname = currentRequestHostname();
   if (!hostname) {
-    setStatus("请先填写请求 URL（用于确定域名）");
+    setStatus("无法确定统计域名（配置 demoFetchUrl）");
     return;
   }
   if (!confirm(`重置 ${hostname} 的 IP 请求统计，并清零热池派发计数？`)) return;
@@ -2231,15 +2300,6 @@ async function main() {
   } catch (err) {
     setStatus(`地图资源加载失败: ${err instanceof Error ? err.message : String(err)}`);
   }
-  const urlInput = /** @type {HTMLInputElement} */ (document.getElementById("fetch-url"));
-  urlInput.value = config.demoFetchUrl ?? "";
-  urlInput.addEventListener("change", () => watchIpStatsHostname());
-  urlInput.addEventListener("input", () => {
-    clearTimeout(urlInput._ipStatsTimer);
-    urlInput._ipStatsTimer = setTimeout(() => watchIpStatsHostname(), 400);
-  });
-  document.getElementById("btn-fetch").addEventListener("click", () => void triggerFetch());
-  document.getElementById("btn-stress").addEventListener("click", () => void triggerStress());
   // 重置统计：功能保留（triggerResetIpStats），入口改到后台设置面板后再挂 UI
   setupPanelResize();
   setupPanelDnD();
