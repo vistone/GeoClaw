@@ -100,5 +100,5 @@ function scheduleReconnect() {
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connect();
-  }, 1200);
+  }, 200);
 }

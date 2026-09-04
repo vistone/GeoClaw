@@ -85,7 +85,7 @@ export {
   buildIpGeoRegistryFromConfig,
   createIpFetchStatsStoreFromConfig,
 } from "./fetch/createFetchMetricsFromConfig.js";
-export { IpFetchStatsStore, normalizeHostname } from "./fetch/IpFetchStatsStore.js";
+export { IpFetchStatsStore, normalizeHostname, normalizeCountryCode, normalizeCountryFilter } from "./fetch/IpFetchStatsStore.js";
 export type { IpFetchStatRow, IpFetchStatsFile, IpFetchStatsSeedIp } from "./fetch/IpFetchStatsStore.js";
 export type {
   FetchMetricsOptions,

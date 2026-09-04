@@ -3,49 +3,80 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>GeoClaw · 请求脉冲航线</title>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+    <title>GeoClaw · 落点航线</title>
+    <link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
     <link href="/styles.css" rel="stylesheet" />
   </head>
   <body>
     <div id="map"></div>
     <aside id="panel">
-      <header>
-        <h1>请求脉冲航线</h1>
+      <div id="panel-resize" role="separator" aria-orientation="vertical" aria-label="调整侧栏宽度"></div>
+      <header class="panel-header">
+        <h1>落点航线</h1>
         <p id="status">连接 WebSocket…</p>
+        <p id="hot-stats" class="hot-pool-line">热池：等待…</p>
       </header>
-      <section>
-        <label for="fetch-url">触发请求 URL</label>
-        <input id="fetch-url" type="url" spellcheck="false" />
-        <button id="btn-fetch" type="button">发起 Fetch</button>
-        <button id="btn-stress" type="button" class="secondary">高并发压测</button>
-      </section>
-      <section id="stats"></section>
-      <section id="ip-stats">
-        <h2>IP 请求统计</h2>
-        <p id="ip-stats-domain" class="muted"></p>
-        <p id="ip-stats-summary" class="muted">等待数据…</p>
-        <button id="btn-reset-ip-stats" type="button" class="secondary">重置统计</button>
-        <div class="ip-stats-table-wrap">
-          <table id="ip-stats-table">
-            <thead>
-              <tr>
-                <th>族</th>
-                <th>IP</th>
-                <th>请求</th>
-                <th>成功</th>
-                <th>失败</th>
-                <th>字节</th>
-                <th>均耗时</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
+
+      <details id="test-tools" class="test-tools">
+        <summary>测试工具（Fetch / 压测）</summary>
+        <div class="test-tools-body">
+          <label for="fetch-url">触发请求 URL</label>
+          <input id="fetch-url" type="url" spellcheck="false" />
+          <button id="btn-fetch" type="button">发起 Fetch</button>
+          <button id="btn-stress" type="button" class="secondary">高并发压测</button>
+          <div id="test-stats" class="test-stats"></div>
         </div>
-      </section>
-      <ul id="route-list"></ul>
+      </details>
+
+      <div id="panel-blocks" class="panel-blocks">
+        <details class="panel-block" data-block="ip-stats" id="ip-stats" open>
+          <summary class="block-head">
+            <button type="button" class="block-drag" title="拖动换位" aria-label="拖动换位">⋮⋮</button>
+            <span class="block-title">IP 请求统计</span>
+          </summary>
+          <div class="block-body">
+            <table id="ip-stats-meta" class="ip-stats-meta">
+              <tbody>
+                <tr><th scope="row">域名</th><td id="ip-meta-line-host">—</td></tr>
+                <tr><th scope="row">IP</th><td id="ip-meta-line-ip" class="num">—</td></tr>
+                <tr><th scope="row">请求</th><td id="ip-meta-line-req" class="num">—</td></tr>
+                <tr><th scope="row">网卡</th><td id="nic-meta-line" class="num">—</td></tr>
+              </tbody>
+            </table>
+            <div id="ip-country-flags" class="ip-country-flags" aria-label="按国别筛选"></div>
+            <p id="ip-stats-window" class="ip-stats-window">本屏：—</p>
+            <p id="ip-stats-summary" class="muted ip-stats-hint" hidden>等待数据…</p>
+            <div class="ip-stats-table-wrap">
+              <table id="ip-stats-table">
+                <thead>
+                  <tr>
+                    <th class="col-drag" aria-label="拖动"></th>
+                    <th class="col-idx">#</th>
+                    <th>族</th>
+                    <th>IP</th>
+                    <th>请求</th>
+                    <th>成功</th>
+                    <th>失败</th>
+                    <th>字节</th>
+                    <th>均耗时</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </details>
+
+        <details class="panel-block panel-block-routes" data-block="routes" open>
+          <summary class="block-head">
+            <button type="button" class="block-drag" title="拖动换位" aria-label="拖动换位">⋮⋮</button>
+            <span class="block-title">请求日志</span>
+          </summary>
+          <ul id="route-list" class="route-list-scroll"></ul>
+        </details>
+      </div>
     </aside>
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <script src="/vendor/leaflet/leaflet.js"></script>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

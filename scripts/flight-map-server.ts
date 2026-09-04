@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 /**
  * GeoJSON 飞行路线可视化服务（Leaflet + Bing Maps + WebSocket）。
- * 直接按热连接池存活 IP 绘制航线；数据经 WS 推送，有变化才下发。
+ * 按落点预绘灰色骨架，请求点亮换色；数据经 WS 推送。
  *
  * 用法：
  *   npm run flight:map
@@ -29,6 +29,8 @@ import {
   type FetchFlightPath,
   type FetchRouteOrigin,
 } from "../src/fetch/FetchFlightPath.js";
+import { NicTrafficSampler } from "./nic-traffic.js";
+import { normalizeCountryFilter } from "../src/fetch/IpFetchStatsStore.js";
 
 const MODULE_DIR = fileURLToPath(new URL(".", import.meta.url));
 const VIZ_DIR = join(MODULE_DIR, "..", "viz", "flight-map");
@@ -37,6 +39,7 @@ const cfg = GeoClawConfig.get();
 const mapCfg = cfg.getFlightMapConfig();
 const webFetch = createWebFetch();
 const ipGeo = buildIpGeoRegistryFromConfig();
+const nicSampler = new NicTrafficSampler(mapCfg.nicIface);
 
 /** ipinfo 解析的客户端原点（异步缓存） */
 let cachedOrigin: FetchRouteOrigin | null = null;
@@ -77,6 +80,8 @@ const MIME: Record<string, string> = {
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json",
   ".geojson": "application/geo+json; charset=utf-8",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
 };
 
 const CORS_HEADERS = {
@@ -115,13 +120,13 @@ function getHotIpSet(): Set<string> {
   return new Set(pool?.getHotIps() ?? []);
 }
 
-/** 已向客户端推送过脉冲的 requestId（只推新请求，不画满热池） */
+/** 已向客户端推送过脉冲的 requestId（只推新激活，避免重复点亮） */
 const pulsedRequestIds = new Set<string>();
 
-/** 启动时吞掉历史航线，只对之后的新请求发脉冲 */
+/** 启动时吞掉历史航线，只对之后的新请求发激活脉冲 */
 function seedPulsedFromHistory(): void {
   const metrics = webFetch.getFetchMetrics();
-  const allRecent = metrics?.getSnapshot().recentFlightPaths ?? [];
+  const allRecent = metrics?.getRecentFlightPaths() ?? [];
   for (const p of allRecent) {
     if (p.requestId) pulsedRequestIds.add(p.requestId);
   }
@@ -148,6 +153,7 @@ function slimPath(p: FetchFlightPath, display: ReturnType<typeof displayOptionsF
   const ip = flightPathTargetIp(p)!;
   const visual = routeVisualFromIp(ip, display);
   const target = p.waypoints.find((w) => w.role === "target");
+  const geo = ip ? ipGeo.lookup(ip) : undefined;
   return {
     requestId: p.requestId,
     pinnedIp: ip,
@@ -156,9 +162,23 @@ function slimPath(p: FetchFlightPath, display: ReturnType<typeof displayOptionsF
     totalDurationMs: p.totalDurationMs,
     httpStatus: p.httpStatus,
     bodyBytes: p.bodyBytes,
-    targetCity: target?.city,
+    targetCity: target?.city ?? geo?.city,
+    targetCountry: target?.country ?? geo?.country,
     targetLabel: target?.label,
+    requestPath: requestPathOnly(p.url),
+    viaHot: p.viaHot,
+    http2: p.http2,
   };
+}
+
+/** 取 URL 斜杠后的路径（pathname + search + hash） */
+function requestPathOnly(url: string): string | undefined {
+  try {
+    const u = new URL(url);
+    return `${u.pathname}${u.search}${u.hash}` || "/";
+  } catch {
+    return undefined;
+  }
 }
 
 /** WS 绘制触发命令：不含坐标折线，前端用本地 IP 目录算弧 */
@@ -176,6 +196,8 @@ function pulseCommand(p: FetchFlightPath) {
     via: "hot" | "cold";
     h2: boolean;
     city?: string;
+    country?: string;
+    path?: string;
     lat?: number;
     lng?: number;
   } = {
@@ -189,6 +211,10 @@ function pulseCommand(p: FetchFlightPath) {
   };
   const city = target?.city ?? geo?.city;
   if (city) cmd.city = city;
+  const country = target?.country ?? geo?.country;
+  if (country) cmd.country = country;
+  const path = requestPathOnly(p.url);
+  if (path) cmd.path = path;
   // 目录里没有坐标时才带上，避免重复传输
   if (!hasCatalogLoc && target && Number.isFinite(target.lat) && Number.isFinite(target.lng)) {
     cmd.lat = target.lat;
@@ -334,11 +360,89 @@ type IpStatsClientState = {
   needFull: boolean;
   /** 已与 store 对齐的 revision；无变化可跳过 */
   revision: number;
+  /** 摘要已推送的 revision（压测中可只推摘要） */
+  summaryRevision: number;
   /** 已推送给该客户端的 IP 签名 */
   lastSent: Map<string, string>;
+  /** 浏览器表格可视区域内的 IP（只对这些行做实时增量） */
+  visibleIps: Set<string>;
+  /** 当前窗口起始下标 */
+  windowStart: number;
+  /** 当前窗口条数 */
+  windowCount: number;
+  /** 国别筛选（ISO2 / ZZ）；null=全部 */
+  countryFilter: string | null;
 };
 
 const ipStatsClients = new WeakMap<WebSocket, IpStatsClientState>();
+
+/**
+ * 按 IP 列表组装带地理信息的行（供可见区推送）。
+ */
+function buildEnrichedRowsForIps(hostname: string, ips: Iterable<string>) {
+  const store = webFetch.getFetchMetrics()?.getIpStatsStore();
+  if (!store) return [] as ReturnType<typeof enrichIpStatRow>[];
+  const out: ReturnType<typeof enrichIpStatRow>[] = [];
+  for (const ip of ips) {
+    const row = store.get(hostname, ip);
+    if (!row) continue;
+    out.push(
+      enrichIpStatRow({
+        ip: row.ip,
+        family: row.family,
+        requests: row.requests,
+        success: row.success,
+        failed: row.failed,
+        totalBytes: row.totalBytes,
+        avgDurationMs: row.avgDurationMs,
+        city: row.city,
+        country: row.country,
+        loc: row.loc,
+      }),
+    );
+  }
+  return out;
+}
+
+/**
+ * 只推汇总数字（不含行），供压测中限频刷新侧栏摘要表。
+ */
+function sendIpStatsMetaToClient(ws: WebSocket): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  const state = ipStatsClients.get(ws);
+  if (!state?.hostname) return;
+  const store = webFetch.getFetchMetrics()?.getIpStatsStore();
+  if (!store) return;
+  const rev = store.getDomainRevision(state.hostname);
+  if (rev === state.summaryRevision) return;
+  const payload = buildIpStatsUiPayload(state.hostname, 0, false);
+  if (!payload) return;
+  state.summaryRevision = rev;
+  ws.send(
+    JSON.stringify({
+      type: "ipStats",
+      mode: "summary",
+      ts: Date.now(),
+      hostname: payload.hostname,
+      updatedAt: payload.updatedAt,
+      totalIps: payload.totalIps,
+      activeIps: payload.activeIps,
+      activeIpv4: payload.activeIpv4,
+      activeIpv6: payload.activeIpv6,
+      totalRequests: payload.totalRequests,
+      totalSuccess: payload.totalSuccess,
+      totalFailed: payload.totalFailed,
+      totalBytes: payload.totalBytes,
+      byCountry: payload.byCountry,
+    }),
+  );
+}
+
+function pushIpStatsMetaToWatchers(): void {
+  for (const client of wss.clients) {
+    if (client.readyState === WebSocket.OPEN) sendIpStatsMetaToClient(client);
+  }
+}
 
 function sendIpStatsToClient(ws: WebSocket, forceFull = false): void {
   if (ws.readyState !== WebSocket.OPEN) return;
@@ -362,34 +466,15 @@ function sendIpStatsToClient(ws: WebSocket, forceFull = false): void {
   if (!forceFull && !state.needFull && rev === state.revision) return;
 
   if (forceFull || state.needFull) {
-    // WS 全量只推摘要；行数据由前端 HTTP → IndexedDB 灌入（includeRows=false 避免组装全表）
+    // 摘要对齐 + 推当前滚动窗口（默认首屏），不再死限 Top40 / HTTP 整表
     const payload = buildIpStatsUiPayload(state.hostname, 0, false);
     if (!payload) return;
-    const allSigs = store.collectChangedActive(state.hostname, new Map());
     state.lastSent.clear();
-    if (allSigs) {
-      for (const r of allSigs.changed) state.lastSent.set(r.ip, r.sig);
-    }
+    store.seedActiveSigsInto(state.hostname, state.lastSent);
     state.revision = rev;
+    state.summaryRevision = rev;
     state.needFull = false;
-    ws.send(
-      JSON.stringify({
-        type: "ipStats",
-        mode: "full",
-        bootstrap: "http",
-        ts: Date.now(),
-        hostname: payload.hostname,
-        updatedAt: payload.updatedAt,
-        totalIps: payload.totalIps,
-        activeIps: payload.activeIps,
-        activeIpv4: payload.activeIpv4,
-        activeIpv6: payload.activeIpv6,
-        totalRequests: payload.totalRequests,
-        totalSuccess: payload.totalSuccess,
-        totalFailed: payload.totalFailed,
-        totalBytes: payload.totalBytes,
-      }),
-    );
+    sendIpStatsWindowToClient(ws, state.windowStart, state.windowCount || 24);
     return;
   }
 
@@ -397,35 +482,120 @@ function sendIpStatsToClient(ws: WebSocket, forceFull = false): void {
   if (!diff) return;
   if (diff.changed.length === 0) {
     state.revision = rev;
+    state.summaryRevision = rev;
     return;
   }
 
-  // 增量一次推完变更，不做单帧条数封顶
-  const changed = [...diff.changed].sort((a, b) => b.requests - a.requests);
-  for (const r of changed) state.lastSent.set(r.ip, r.sig);
+  // 屏外变更只记账；有任何变更则重推当前滚动窗口（编号/本屏内容随序更新）
+  for (const r of diff.changed) {
+    state.lastSent.set(r.ip, r.sig);
+  }
   state.revision = rev;
+  state.summaryRevision = rev;
+  sendIpStatsWindowToClient(ws, state.windowStart, state.windowCount || 24);
+}
 
+/**
+ * 客户端上报可视 IP 后：立即推这些行的当前值。
+ */
+function sendVisibleIpStatsToClient(ws: WebSocket, ips: string[]): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  const state = ipStatsClients.get(ws);
+  if (!state?.hostname) return;
+  state.visibleIps = new Set(ips.filter(Boolean));
+  const payload = buildIpStatsUiPayload(state.hostname, 0, false);
+  if (!payload) return;
+  const upsert = buildEnrichedRowsForIps(state.hostname, state.visibleIps);
+  for (const r of upsert) state.lastSent.set(r.ip, rowSig(r));
+  state.summaryRevision = storeRevision(state.hostname);
   ws.send(
     JSON.stringify({
       type: "ipStats",
       mode: "delta",
       ts: Date.now(),
-      hostname: diff.hostname,
-      updatedAt: diff.updatedAt,
-      totalIps: diff.totalIps,
-      activeIps: diff.activeIps,
-      activeIpv4: diff.activeIpv4,
-      activeIpv6: diff.activeIpv6,
-      totalRequests: diff.totalRequests,
-      totalSuccess: diff.totalSuccess,
-      totalFailed: diff.totalFailed,
-      totalBytes: diff.totalBytes,
-      upsert: changed.map((r) => {
-        const { sig: _sig, ...rest } = r;
-        return enrichIpStatRow(rest);
-      }),
+      hostname: payload.hostname,
+      updatedAt: payload.updatedAt,
+      totalIps: payload.totalIps,
+      activeIps: payload.activeIps,
+      activeIpv4: payload.activeIpv4,
+      activeIpv6: payload.activeIpv6,
+      totalRequests: payload.totalRequests,
+      totalSuccess: payload.totalSuccess,
+      totalFailed: payload.totalFailed,
+      totalBytes: payload.totalBytes,
+      byCountry: payload.byCountry,
+      upsert,
     }),
   );
+}
+
+/**
+ * 按滚动窗口推送一屏 IP 行（带起止编号）。
+ */
+function sendIpStatsWindowToClient(ws: WebSocket, start: number, count: number): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  const state = ipStatsClients.get(ws);
+  if (!state?.hostname) return;
+  const store = webFetch.getFetchMetrics()?.getIpStatsStore();
+  if (!store) return;
+  const win = store.sliceActiveIpWindow(
+    state.hostname,
+    start,
+    count,
+    state.countryFilter,
+  );
+  if (!win) return;
+  const payload = buildIpStatsUiPayload(state.hostname, 0, false);
+  if (!payload) return;
+
+  state.windowStart = win.start;
+  state.windowCount = Math.max(1, win.end - win.start);
+  state.visibleIps = new Set(win.rows.map((r) => r.ip));
+
+  const upsert = win.rows.map((r) => {
+    const enriched = enrichIpStatRow({
+      ip: r.ip,
+      family: r.family,
+      requests: r.requests,
+      success: r.success,
+      failed: r.failed,
+      totalBytes: r.totalBytes,
+      avgDurationMs: r.avgDurationMs,
+      city: r.city,
+      country: r.country,
+      loc: r.loc,
+    });
+    state.lastSent.set(r.ip, rowSig(enriched));
+    return { ...enriched, index: r.index };
+  });
+
+  state.summaryRevision = store.getDomainRevision(state.hostname);
+  ws.send(
+    JSON.stringify({
+      type: "ipStats",
+      mode: "window",
+      ts: Date.now(),
+      hostname: payload.hostname,
+      updatedAt: payload.updatedAt,
+      totalIps: payload.totalIps,
+      activeIps: payload.activeIps,
+      activeIpv4: payload.activeIpv4,
+      activeIpv6: payload.activeIpv6,
+      totalRequests: payload.totalRequests,
+      totalSuccess: payload.totalSuccess,
+      totalFailed: payload.totalFailed,
+      totalBytes: payload.totalBytes,
+      byCountry: payload.byCountry,
+      countryFilter: state.countryFilter,
+      window: { total: win.total, start: win.start, end: win.end },
+      upsert,
+      replaceVisible: true,
+    }),
+  );
+}
+
+function storeRevision(hostname: string): number {
+  return webFetch.getFetchMetrics()?.getIpStatsStore()?.getDomainRevision(hostname) ?? 0;
 }
 
 function pushIpStatsToWatchers(forceFull = false): void {
@@ -467,6 +637,7 @@ function resetIpStatsForHostname(hostname: string): {
     if (!state || state.hostname !== host) continue;
     state.needFull = true;
     state.revision = -1;
+    state.summaryRevision = -1;
     state.lastSent.clear();
   }
   pushIpStatsToWatchers(true);
@@ -479,7 +650,7 @@ function resetIpStatsForHostname(hostname: string): {
  */
 function drainNewRoutePulses(): ReturnType<typeof pulseCommand>[] | null {
   const metrics = webFetch.getFetchMetrics();
-  const allRecent = metrics?.getSnapshot().recentFlightPaths ?? [];
+  const allRecent = metrics?.getRecentFlightPaths() ?? [];
   const hotIps = getHotIpSet();
   const fresh = filterFlightPathsByHotIps(allRecent, hotIps).filter(
     (p) => p.requestId && !pulsedRequestIds.has(p.requestId),
@@ -496,10 +667,10 @@ function drainNewRoutePulses(): ReturnType<typeof pulseCommand>[] | null {
   return fresh.map((p) => pulseCommand(p));
 }
 
-/** REST / geojson.io：仅最近若干次真实请求（非全热池） */
+/** REST / geojson.io：仅最近若干次真实请求（激活脉冲，非重复全量航线） */
 function buildFlightPathsPayload() {
   const metrics = webFetch.getFetchMetrics();
-  const allRecent = metrics?.getSnapshot().recentFlightPaths ?? [];
+  const allRecent = metrics?.getRecentFlightPaths() ?? [];
   const hotIps = getHotIpSet();
   const paths = filterFlightPathsByHotIps(allRecent, hotIps).slice(-40);
   const display = displayOptionsFor(paths);
@@ -552,18 +723,40 @@ function broadcastStatus(force = false): void {
   broadcastJson({ type: "poolStatus", ts: Date.now(), ...payload });
 }
 
-function broadcastNewPulses(): void {
+function broadcastNewPulses(maxItems?: number): void {
   const items = drainNewRoutePulses();
   if (!items || items.length === 0) return;
+  // 按落点坐标去重：同坐标本批只推一次（保留最后一次，前端只换色）
+  const byRoute = new Map<string, (typeof items)[number]>();
+  for (const item of items) {
+    const geo = item.ip ? ipGeo.lookup(item.ip) : undefined;
+    const loc =
+      parseLoc(geo?.loc) ??
+      (Number.isFinite(item.lat) && Number.isFinite(item.lng)
+        ? { lat: item.lat as number, lng: item.lng as number }
+        : null);
+    const key = loc
+      ? `ll:${loc.lat.toFixed(4)},${loc.lng.toFixed(4)}`
+      : `ip:${item.ip || item.id}`;
+    byRoute.set(key, item);
+  }
+  let payload = [...byRoute.values()];
+  if (maxItems != null && payload.length > maxItems) {
+    payload = payload.slice(-maxItems);
+  }
   broadcastJson({
     type: "pulse",
     ts: Date.now(),
-    items,
+    items: payload,
   });
 }
 
 function tickBroadcast(): void {
   broadcastNewPulses();
+  if (stressRunning) {
+    // 压测中仍推脉冲；状态/IP 由 runStress 自己推，避免重复扫
+    return;
+  }
   broadcastStatus(false);
   pushIpStatsToWatchers(false);
 }
@@ -590,9 +783,12 @@ async function runFetch(fetchUrl: string) {
 }
 
 let stressRunning = false;
+/** 压测中合并同一事件循环内的脉冲推送（只合并，不丢弃、不封顶） */
+let stressPulseFlushScheduled = false;
+let stressLastProgressAt = 0;
 
 /**
- * 高并发压测：经热池 round-robin 取 IP 发请求，驱动前端脉冲。
+ * 高并发压测：经热池发请求，驱动前端脉冲。
  */
 async function runStress(opts: {
   url?: string;
@@ -625,6 +821,7 @@ async function runStress(opts: {
   );
 
   stressRunning = true;
+  stressLastProgressAt = 0;
   broadcastJson({
     type: "stressStatus",
     ts: Date.now(),
@@ -633,6 +830,9 @@ async function runStress(opts: {
     concurrency,
     total,
     hotCount,
+    succeeded: 0,
+    failed: 0,
+    done: 0,
   });
 
   console.log("高并发压测开始:", { concurrency, total, hotCount, url: fetchUrl });
@@ -641,6 +841,39 @@ async function runStress(opts: {
   let fail = 0;
   let next = 0;
   let inFlight = 0;
+
+  /** 同 tick 内合并推送；推送全部新脉冲，不限流丢弃 */
+  const flushStressPulses = () => {
+    if (stressPulseFlushScheduled) return;
+    stressPulseFlushScheduled = true;
+    setImmediate(() => {
+      stressPulseFlushScheduled = false;
+      broadcastNewPulses();
+    });
+  };
+
+  const maybeProgress = () => {
+    const done = ok + fail;
+    const now = Date.now();
+    if (done < total && now - stressLastProgressAt < 400) return;
+    stressLastProgressAt = now;
+    broadcastJson({
+      type: "stressStatus",
+      ts: now,
+      status: "running",
+      url: fetchUrl,
+      concurrency,
+      total,
+      hotCount: hotPool.getHotCount(),
+      succeeded: ok,
+      failed: fail,
+      done,
+      elapsedMs: now - started,
+    });
+    pushIpStatsMetaToWatchers();
+    pushIpStatsToWatchers(false);
+    flushStressPulses();
+  };
 
   await new Promise<void>((resolve) => {
     const pump = () => {
@@ -657,25 +890,41 @@ async function runStress(opts: {
           })
           .finally(() => {
             inFlight -= 1;
-            // 每次完成立刻推脉冲，前端实时心跳
-            tickBroadcast();
+            flushStressPulses();
+            maybeProgress();
             if (ok + fail >= total) resolve();
-            else pump();
+            else if (inFlight < concurrency) pump();
           });
       }
     };
-    pump();
+    // 分拍启动，避免一次同步拉起数百个任务堵住接收循环
+    const kick = () => {
+      pump();
+      if (ok + fail < total && inFlight < concurrency && next < total) {
+        setImmediate(kick);
+      }
+    };
+    kick();
   });
 
   stressRunning = false;
-  tickBroadcast();
+  broadcastNewPulses();
+  for (const client of wss.clients) {
+    if (client.readyState !== WebSocket.OPEN) continue;
+    const state = ipStatsClients.get(client);
+    if (!state?.hostname) continue;
+    state.needFull = true;
+    state.revision = -1;
+  }
+  pushIpStatsToWatchers(true);
+  broadcastStatus(false);
   const summary = {
     ok: true as const,
     concurrency,
     total,
     succeeded: ok,
     failed: fail,
-    hotCount,
+    hotCount: hotPool.getHotCount(),
     elapsedMs: Date.now() - started,
   };
   console.log("高并发压测结束:", summary);
@@ -873,14 +1122,18 @@ wss.on("connection", (ws) => {
     JSON.stringify({
       type: "hello",
       ts: Date.now(),
-      message: "GeoClaw flight-map WebSocket · 仅请求脉冲航线",
+      message: "GeoClaw flight-map WebSocket · 落点骨架 + 请求点亮",
     }),
   );
 
-  // 连接时只下发热池状态，不回放历史航线（避免一上来画满）
+  // 连接时只下发热池状态；灰色骨架由前端 map-assets 预绘，不回放历史激活
   const status = buildStatusPayload();
   lastStatusFingerprint = statusFingerprint(status);
   ws.send(JSON.stringify({ type: "poolStatus", ts: Date.now(), ...status }));
+  const nicNow = nicSampler.sample();
+  if (nicNow) {
+    ws.send(JSON.stringify({ type: "nicTraffic", ...nicNow }));
+  }
 
   ws.on("message", (raw) => {
     void (async () => {
@@ -929,10 +1182,49 @@ wss.on("connection", (ws) => {
             limit,
             needFull: !sameHost,
             revision: sameHost ? (prev?.revision ?? -1) : -1,
+            summaryRevision: sameHost ? (prev?.summaryRevision ?? -1) : -1,
             lastSent: sameHost ? (prev?.lastSent ?? new Map()) : new Map(),
+            visibleIps: sameHost ? (prev?.visibleIps ?? new Set()) : new Set(),
+            windowStart: sameHost ? (prev?.windowStart ?? 0) : 0,
+            windowCount: sameHost ? (prev?.windowCount ?? 24) : 24,
+            countryFilter: sameHost ? (prev?.countryFilter ?? null) : null,
           });
           // 同域名再订阅：若无变更则不推；换域名则全量
           sendIpStatsToClient(ws, !sameHost);
+          return;
+        }
+        if (msg.type === "visibleIpStats") {
+          const hostname = String(msg.hostname ?? "")
+            .trim()
+            .toLowerCase();
+          const state = ipStatsClients.get(ws);
+          if (!state || (hostname && state.hostname !== hostname)) {
+            return;
+          }
+          const ips = Array.isArray(msg.ips)
+            ? msg.ips.map((x: unknown) => String(x ?? "").trim()).filter(Boolean)
+            : [];
+          sendVisibleIpStatsToClient(ws, ips);
+          return;
+        }
+        if (msg.type === "ipStatsWindow") {
+          const hostname = String(msg.hostname ?? "")
+            .trim()
+            .toLowerCase();
+          const state = ipStatsClients.get(ws);
+          if (!state || (hostname && state.hostname !== hostname)) return;
+          const start = Number(msg.start);
+          const count = Number(msg.count);
+          if ("country" in msg) {
+            state.countryFilter = normalizeCountryFilter(
+              msg.country == null ? null : String(msg.country),
+            );
+          }
+          sendIpStatsWindowToClient(
+            ws,
+            Number.isFinite(start) ? start : 0,
+            Number.isFinite(count) ? count : 24,
+          );
           return;
         }
         if (msg.type === "resetIpStats") {
@@ -964,7 +1256,12 @@ wss.on("connection", (ws) => {
               limit: prev?.limit ?? 0,
               needFull: !sameHost,
               revision: sameHost ? (prev?.revision ?? -1) : -1,
+              summaryRevision: sameHost ? (prev?.summaryRevision ?? -1) : -1,
               lastSent: sameHost ? (prev?.lastSent ?? new Map()) : new Map(),
+              visibleIps: sameHost ? (prev?.visibleIps ?? new Set()) : new Set(),
+              windowStart: sameHost ? (prev?.windowStart ?? 0) : 0,
+              windowCount: sameHost ? (prev?.windowCount ?? 24) : 24,
+              countryFilter: sameHost ? (prev?.countryFilter ?? null) : null,
             });
           } catch {
             /* ignore */
@@ -1004,7 +1301,12 @@ wss.on("connection", (ws) => {
                 limit: prev?.limit ?? 0,
                 needFull: !sameHost,
                 revision: sameHost ? (prev?.revision ?? -1) : -1,
+                summaryRevision: sameHost ? (prev?.summaryRevision ?? -1) : -1,
                 lastSent: sameHost ? (prev?.lastSent ?? new Map()) : new Map(),
+                visibleIps: sameHost ? (prev?.visibleIps ?? new Set()) : new Set(),
+                windowStart: sameHost ? (prev?.windowStart ?? 0) : 0,
+                windowCount: sameHost ? (prev?.windowCount ?? 24) : 24,
+                countryFilter: sameHost ? (prev?.countryFilter ?? null) : null,
               });
             } catch {
               /* ignore */
@@ -1052,12 +1354,19 @@ setInterval(() => {
   else tickBroadcast();
 }, 400);
 
+/** 本机网卡上下行速率（全连接广播） */
+setInterval(() => {
+  const sample = nicSampler.sample();
+  if (!sample) return;
+  broadcastJson({ type: "nicTraffic", ...sample });
+}, Math.max(1, mapCfg.nicSampleMs));
+
 server.listen(mapCfg.port, mapCfg.host, () => {
   const base = `http://${mapCfg.host}:${mapCfg.port}`;
   console.log("=== GeoClaw 热池 IP 飞行地图 (WS + Bing) ===");
   console.log("地图:", base);
   console.log("WebSocket:", `ws://${mapCfg.host}:${mapCfg.port}/ws`);
-  console.log("规则: 仅实际请求触发虚线脉冲 · 绘出后淡出 · 不画满热池");
+  console.log("规则: 按落点预绘灰色骨架 · 请求点亮换色 · 超时淡回灰");
   console.log(
     "LEO 轨道:",
     `${mapCfg.leoAltitudeMinKm}-${mapCfg.leoAltitudeMaxKm} km`,

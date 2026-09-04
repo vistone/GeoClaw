@@ -388,6 +388,14 @@ export class FetchMetrics {
   }
 
   /**
+   * 只读近期飞行路径（不拷贝 byIp 大表，供地图脉冲 drain）。
+   * @returns 输出：`readonly FetchFlightPath[]` — 环形缓冲当前内容
+   */
+  getRecentFlightPaths(): readonly FetchFlightPath[] {
+    return this.recentFlightPaths;
+  }
+
+  /**
    * 将当前快照摘要打到 INFO 日志。
    * @returns 输出：无（`void`）
    */

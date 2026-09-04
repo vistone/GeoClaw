@@ -137,6 +137,10 @@ export type GeoClawConfigFile = {
     stressConcurrency?: number;
     stressTotal?: number | null;
     stressOnStart?: boolean;
+    /** 网卡名；null/空=默认路由网卡 */
+    nicIface?: string | null;
+    /** 网卡流量采样间隔（毫秒） */
+    nicSampleMs?: number;
   };
 };
 
@@ -397,6 +401,8 @@ export class GeoClawConfig {
     stressConcurrency: number;
     stressTotal: number | null;
     stressOnStart: boolean;
+    nicIface: string | null;
+    nicSampleMs: number;
   } {
     const m = this.file.flightMap;
     const planetoid = joinUrl(this.file.rocktree.baseUrl, this.file.benchmark.planetoidPath);
@@ -418,11 +424,13 @@ export class GeoClawConfig {
       leoAltitudeMaxKm: m?.leoAltitudeMaxKm ?? 48,
       orbitDisplayExaggeration: m?.orbitDisplayExaggeration ?? 2.5,
       routeDrawMs: m?.routeDrawMs ?? 1400,
-      routeHoldMs: m?.routeHoldMs ?? 500,
-      routeFadeMs: m?.routeFadeMs ?? 2800,
+      routeHoldMs: m?.routeHoldMs ?? 16000,
+      routeFadeMs: m?.routeFadeMs ?? 4000,
       stressConcurrency: m?.stressConcurrency ?? 40,
       stressTotal: m?.stressTotal ?? null,
       stressOnStart: m?.stressOnStart ?? false,
+      nicIface: m?.nicIface?.trim() || null,
+      nicSampleMs: m?.nicSampleMs ?? 1000,
     };
   }
 

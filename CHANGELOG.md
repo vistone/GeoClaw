@@ -7,6 +7,21 @@
 
 （尚无条目。）
 
+## [0.0.21] - 2026-09-04
+
+### 新增
+
+- 飞行地图：按落点坐标预绘灰色骨架（同坐标一条线）；请求点亮为 IP 色，超时淡回灰
+- 飞行地图：国别国旗条、网卡流量（`nicIface` / `nicSampleMs`）、侧栏 IP 滚动窗口与国别筛选
+- `IpFetchStatsStore.listOrderedActiveIps` / `sliceActiveIpWindow` / `byCountry`；导出 `normalizeCountryCode` / `normalizeCountryFilter`
+- `FetchMetrics.getRecentFlightPaths()`：脉冲 drain 不再全量 `getSnapshot`
+
+### 变更
+
+- `routeHoldMs` 默认 16000、`routeFadeMs` 默认 4000；`stressTotal` 配置可至 100000
+- 压测脉冲按落点去重推送；去掉 IP 窗口硬封顶 200、网卡采样硬下限 200ms
+- 文案与启动规则对齐「骨架预绘 + 请求点亮」，去掉过时的「不画满热池」
+
 ## [0.0.20] - 2026-09-03
 
 ### 新增

@@ -146,9 +146,9 @@ ipinfo:
 
 # ---------- 飞行地图（npm run flight:map） ----------
 flightMap:
-  # HTTP/WS 监听地址
-  host: 127.0.0.1
-  # 监听端口（浏览器打开 http://host:port）
+  # HTTP/WS 监听地址（0.0.0.0=局域网可访问；仅本机用 127.0.0.1）
+  host: 0.0.0.0
+  # 监听端口（浏览器打开 http://<本机IP>:port）
   port: 8765
   # 备用 MapLibre style URL（tileProvider 不用时或调试用）
   mapStyleUrl: https://demotiles.maplibre.org/style.json
@@ -179,12 +179,16 @@ flightMap:
   # 单条航线脉冲：绘制动画时长（毫秒）
   routeDrawMs: 1400
   # 绘制完成后停留时长（毫秒）
-  routeHoldMs: 500
+  routeHoldMs: 16000
   # 停留后淡出时长（毫秒）
-  routeFadeMs: 2800
+  routeFadeMs: 4000
   # 压测并发：同时用多少热连接发请求（冲地图脉冲）
   stressConcurrency: 500
   # 压测总请求数；null=按热池 IP 数与并发估算（约 max(hot*2, concurrency*2)）
-  stressTotal: 10000
+  stressTotal: 100000
   # true：热池就绪后自动开跑一轮压测
   stressOnStart: false
+  # 网卡流量监视：网卡名；null=自动取默认路由网卡
+  nicIface: null
+  # 网卡流量采样间隔（毫秒），经 WS 推送上下行速率
+  nicSampleMs: 1000

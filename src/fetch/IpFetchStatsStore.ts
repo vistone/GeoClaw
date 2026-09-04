@@ -323,6 +323,166 @@ export class IpFetchStatsStore {
   }
 
   /**
+   * 将有请求的 IP 签名写入 target（全量同步后供增量比对，不组装 UI 行）。
+   * @param hostname - 输入：`string` — 请求主机名
+   * @param target - 输入：`Map<string, string>` — ip → sig
+   * @returns 输出：`number` — 写入条数
+   */
+  seedActiveSigsInto(hostname: string, target: Map<string, string>): number {
+    return IpFetchStatsStore.logger.measureSync(
+      "seedActiveSigsInto",
+      () => {
+        const host = normalizeHostname(hostname);
+        if (!host) return 0;
+        const bucket = this.domains.get(host);
+        if (!bucket) return 0;
+        let n = 0;
+        for (const [ip, row] of bucket.rows) {
+          if ((row.requests ?? 0) <= 0) continue;
+          const avgDurationMs = avgMs(row);
+          target.set(
+            ip,
+            `${row.requests}:${row.success}:${row.failed}:${row.totalBytes}:${avgDurationMs}`,
+          );
+          n += 1;
+        }
+        return n;
+      },
+      { hostname },
+    );
+  }
+
+  /** 按 revision 缓存的活跃 IP 交错序列 */
+  private readonly orderedActiveIpCache = new Map<
+    string,
+    { revision: number; ips: string[] }
+  >();
+
+  /**
+   * 返回有请求 IP 的稳定交错序列（v4/v6 按请求量交错）。
+   * @param hostname - 输入：`string` — 请求主机名
+   * @param countryFilter - 输入：`string | null | undefined` — ISO 国别码；空=全部；`ZZ`=无国别
+   * @returns 输出：`string[]` — IP 列表；非法主机名为空数组
+   */
+  listOrderedActiveIps(hostname: string, countryFilter?: string | null): string[] {
+    return IpFetchStatsStore.logger.measureSync(
+      "listOrderedActiveIps",
+      () => {
+        const host = normalizeHostname(hostname);
+        if (!host) return [];
+        const revision = this.getDomainRevision(host);
+        const hit = this.orderedActiveIpCache.get(host);
+        let ips: string[];
+        if (hit && hit.revision === revision) {
+          ips = hit.ips;
+        } else {
+          const bucket = this.ensureDomain(host);
+          const listV4: Array<[string, IpFetchStatRow]> = [];
+          const listV6: Array<[string, IpFetchStatRow]> = [];
+          for (const [ip, row] of bucket.rows) {
+            if ((row.requests ?? 0) <= 0) continue;
+            (ip.includes(":") ? listV6 : listV4).push([ip, row]);
+          }
+          const byReq = (a: [string, IpFetchStatRow], b: [string, IpFetchStatRow]) =>
+            b[1].requests - a[1].requests || a[0].localeCompare(b[0]);
+          listV4.sort(byReq);
+          listV6.sort(byReq);
+          const pairs = interleavePairs(listV4, listV6, listV4.length + listV6.length);
+          ips = pairs.map(([ip]) => ip);
+          this.orderedActiveIpCache.set(host, { revision, ips });
+        }
+        const filter = normalizeCountryFilter(countryFilter);
+        if (!filter) return ips;
+        const bucket = this.ensureDomain(host);
+        return ips.filter((ip) => {
+          const row = bucket.rows.get(ip);
+          return normalizeCountryCode(row?.country) === filter;
+        });
+      },
+      { hostname, countryFilter: countryFilter ?? "" },
+    );
+  }
+
+  /**
+   * 按交错序截取活跃 IP 窗口并返回行数据。
+   * @param hostname - 输入：`string` — 请求主机名
+   * @param start - 输入：`number` — 起始下标（从 0，含）
+   * @param count - 输入：`number` — 窗口条数
+   * @param countryFilter - 输入：`string | null | undefined` — 国别筛选；空=全部
+   * @returns 输出：`null | object` — total/start/end/rows；非法主机名为 null
+   */
+  sliceActiveIpWindow(
+    hostname: string,
+    start: number,
+    count: number,
+    countryFilter?: string | null,
+  ): {
+    total: number;
+    start: number;
+    end: number;
+    rows: Array<{
+      ip: string;
+      family: "ipv4" | "ipv6";
+      requests: number;
+      success: number;
+      failed: number;
+      totalBytes: number;
+      avgDurationMs: number;
+      city?: string;
+      country?: string;
+      loc?: string;
+      index: number;
+    }>;
+  } | null {
+    return IpFetchStatsStore.logger.measureSync(
+      "sliceActiveIpWindow",
+      () => {
+        const host = normalizeHostname(hostname);
+        if (!host) return null;
+        const ips = this.listOrderedActiveIps(host, countryFilter);
+        const total = ips.length;
+        const safeStart = Math.max(0, Math.min(total, Math.floor(start) || 0));
+        const safeCount = Math.max(1, Math.floor(count) || 24);
+        const end = Math.min(total, safeStart + safeCount);
+        const bucket = this.ensureDomain(host);
+        const rows: Array<{
+          ip: string;
+          family: "ipv4" | "ipv6";
+          requests: number;
+          success: number;
+          failed: number;
+          totalBytes: number;
+          avgDurationMs: number;
+          city?: string;
+          country?: string;
+          loc?: string;
+          index: number;
+        }> = [];
+        for (let i = safeStart; i < end; i++) {
+          const ip = ips[i]!;
+          const row = bucket.rows.get(ip);
+          if (!row) continue;
+          rows.push({
+            ip,
+            family: ip.includes(":") ? ("ipv6" as const) : ("ipv4" as const),
+            requests: row.requests,
+            success: row.success,
+            failed: row.failed,
+            totalBytes: row.totalBytes,
+            avgDurationMs: avgMs(row),
+            ...(row.city ? { city: row.city } : {}),
+            ...(row.country ? { country: row.country } : {}),
+            ...(row.loc ? { loc: row.loc } : {}),
+            index: i,
+          });
+        }
+        return { total, start: safeStart, end, rows };
+      },
+      { hostname, start, count, countryFilter: countryFilter ?? "" },
+    );
+  }
+
+  /**
    * 汇总某域名 IP 统计供 UI 展示。
    * @param hostname - 输入：`string` — 请求主机名
    * @param topN - 输入：`number` — ≤0 返回全部行；>0 仅活跃 TopN（v4/v6 交错）
@@ -345,6 +505,14 @@ export class IpFetchStatsStore {
     totalSuccess: number;
     totalFailed: number;
     totalBytes: number;
+    byCountry: Array<{
+      code: string;
+      ips: number;
+      requests: number;
+      success: number;
+      failed: number;
+      totalBytes: number;
+    }>;
     top: Array<{
       ip: string;
       family: "ipv4" | "ipv6";
@@ -373,6 +541,10 @@ export class IpFetchStatsStore {
         let activeIpv4 = 0;
         let activeIpv6 = 0;
         const onlyActive = topN > 0;
+        const countryAgg = new Map<
+          string,
+          { ips: number; requests: number; success: number; failed: number; totalBytes: number }
+        >();
 
         for (const [ip, row] of bucket.rows) {
           const req = row.requests ?? 0;
@@ -383,6 +555,20 @@ export class IpFetchStatsStore {
             totalBytes += row.totalBytes;
             if (ip.includes(":")) activeIpv6 += 1;
             else activeIpv4 += 1;
+            const code = normalizeCountryCode(row.country);
+            const cur = countryAgg.get(code) ?? {
+              ips: 0,
+              requests: 0,
+              success: 0,
+              failed: 0,
+              totalBytes: 0,
+            };
+            cur.ips += 1;
+            cur.requests += row.requests;
+            cur.success += row.success;
+            cur.failed += row.failed;
+            cur.totalBytes += row.totalBytes;
+            countryAgg.set(code, cur);
           } else if (onlyActive) {
             continue;
           }
@@ -425,6 +611,10 @@ export class IpFetchStatsStore {
           }));
         }
 
+        const byCountry = [...countryAgg.entries()]
+          .map(([code, v]) => ({ code, ...v }))
+          .sort((a, b) => b.requests - a.requests || a.code.localeCompare(b.code));
+
         return {
           hostname: host,
           updatedAt: new Date().toISOString(),
@@ -436,6 +626,7 @@ export class IpFetchStatsStore {
           totalSuccess,
           totalFailed,
           totalBytes,
+          byCountry,
           top,
         };
       },
@@ -689,6 +880,32 @@ function interleavePairs<T>(v4: T[], v6: T[], topN: number): T[] {
     if (j < v6.length) out.push(v6[j++]!);
   }
   return out;
+}
+
+/**
+ * 规范化国别码；无效则 `ZZ`（未知）。
+ * @param raw - 输入：`string | undefined` — 原始国别
+ * @returns 输出：`string` — 大写二字码或 ZZ
+ */
+export function normalizeCountryCode(raw: string | undefined): string {
+  const t = String(raw ?? "")
+    .trim()
+    .toUpperCase();
+  if (/^[A-Z]{2}$/.test(t)) return t;
+  return "ZZ";
+}
+
+/**
+ * 规范化筛选国别；空/`ALL` 表示不筛选。
+ * @param raw - 输入：`string | null | undefined` — 筛选值
+ * @returns 输出：`string | null` — 国别码或 null
+ */
+export function normalizeCountryFilter(raw: string | null | undefined): string | null {
+  const t = String(raw ?? "")
+    .trim()
+    .toUpperCase();
+  if (!t || t === "ALL" || t === "*") return null;
+  return normalizeCountryCode(t);
 }
 
 /**

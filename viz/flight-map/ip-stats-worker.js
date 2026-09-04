@@ -47,28 +47,26 @@ self.onmessage = (ev) => {
   }
 
   if (msg.type === "watch") {
-    void watchHostname(String(msg.hostname || "").trim().toLowerCase());
+    void watchHostname(String(msg.hostname || "").trim().toLowerCase(), {
+      bootstrapHttp: Boolean(msg.bootstrapHttp),
+    });
     return;
   }
 
   if (msg.type === "resetLocal") {
     const host = String(msg.hostname || "").trim().toLowerCase();
     void (async () => {
+      // 打断进行中的 HTTP 全量，避免与重置抢画
+      if (bootstrapAbort) {
+        bootstrapAbort.abort();
+        bootstrapAbort = null;
+      }
+      bootstrappingHost = null;
+
       if (host) await clearIpStatsCache(host);
       rows.clear();
-      meta = host ? { hostname: host } : {};
-      watchingHost = host;
-      renderGen += 1;
-      self.postMessage({
-        type: "ipStatsUi",
-        action: "clear",
-        hint: host ? `已重置 ${host} 统计，等待新请求…` : "请填写请求 URL",
-      });
-      if (host) {
-        self.postMessage({
-          type: "ipStatsUi",
-          action: "summary",
-          meta: {
+      meta = host
+        ? {
             hostname: host,
             totalIps: 0,
             activeIps: 0,
@@ -78,20 +76,42 @@ self.onmessage = (ev) => {
             totalSuccess: 0,
             totalFailed: 0,
             totalBytes: 0,
-          },
+          }
+        : {};
+      watchingHost = host;
+      renderGen += 1;
+      const gen = renderGen;
+      self.postMessage({
+        type: "ipStatsUi",
+        action: "clear",
+        hint: host ? `已重置 ${host} 统计，等待新请求…` : "请填写请求 URL",
+      });
+      if (host) {
+        self.postMessage({
+          type: "ipStatsUi",
+          action: "summary",
+          meta: { ...meta },
         });
+        // 空表立刻画出来，不必等下一次刷新
+        postFullChunks(gen);
       }
     })();
+    return;
   }
 };
 
+/** @type {string | null} */
+let bootstrappingHost = null;
+
 /**
  * @param {string} hostname
+ * @param {{ bootstrapHttp?: boolean }} [opts]
  */
-async function watchHostname(hostname) {
+async function watchHostname(hostname, opts = {}) {
   if (bootstrapAbort) {
     bootstrapAbort.abort();
     bootstrapAbort = null;
+    bootstrappingHost = null;
   }
 
   watchingHost = hostname;
@@ -111,23 +131,30 @@ async function watchHostname(hostname) {
   const cached = await loadIpStatsCache(hostname);
   if (hostname !== watchingHost || gen !== renderGen) return;
 
+  // WS 实时路径：只恢复摘要，不把 IDB 里上千行一次灌进 DOM
   rows.clear();
-  if (cached?.rows) {
-    for (const [ip, row] of Object.entries(cached.rows)) {
-      rows.set(ip, row);
-    }
+  if (cached?.meta) {
     meta = {
       hostname,
       updatedAt: cached.updatedAt,
       ...(cached.meta ?? {}),
     };
-    postFullChunks(gen);
+    self.postMessage({ type: "ipStatsUi", action: "summary", meta: { ...meta } });
   } else {
     meta = { hostname };
     self.postMessage({ type: "ipStatsUi", action: "summary", meta: { ...meta } });
   }
 
-  await bootstrapHttp(hostname, gen);
+  // 无 WS 时才 HTTP/IDB 灌表
+  if (opts.bootstrapHttp) {
+    if (cached?.rows) {
+      for (const [ip, row] of Object.entries(cached.rows)) {
+        rows.set(ip, row);
+      }
+      postFullChunks(gen);
+    }
+    await bootstrapHttp(hostname, gen);
+  }
 }
 
 /**
@@ -136,6 +163,12 @@ async function watchHostname(hostname) {
  */
 async function bootstrapHttp(hostname, gen) {
   if (!httpOrigin) return;
+  // 同域名已有灌入：打断旧的，用当前 gen 重拉（重置后必须能画上）
+  if (bootstrapAbort) {
+    bootstrapAbort.abort();
+    bootstrapAbort = null;
+  }
+  bootstrappingHost = hostname;
   const ac = new AbortController();
   bootstrapAbort = ac;
   try {
@@ -174,6 +207,7 @@ async function bootstrapHttp(hostname, gen) {
     if (err?.name === "AbortError") return;
   } finally {
     if (bootstrapAbort === ac) bootstrapAbort = null;
+    if (bootstrappingHost === hostname) bootstrappingHost = null;
   }
 }
 
@@ -211,6 +245,8 @@ async function onIpStatsFromWs(msg) {
     totalSuccess: msg.totalSuccess,
     totalFailed: msg.totalFailed,
     totalBytes: msg.totalBytes,
+    byCountry: msg.byCountry,
+    countryFilter: msg.countryFilter,
   };
 
   if (msg.mode === "full" || !msg.mode) {
@@ -228,25 +264,66 @@ async function onIpStatsFromWs(msg) {
       postFullChunks(renderGen);
     } else {
       self.postMessage({ type: "ipStatsUi", action: "summary", meta: { ...meta } });
-      if (msg.bootstrap === "http") {
+      // 重置后无请求：直接空表 + 摘要，勿再 HTTP 全量（易与 resetLocal 抢画导致卡住）
+      const idle =
+        (Number(msg.activeIps) || 0) === 0 && (Number(msg.totalRequests) || 0) === 0;
+      if (idle) {
+        rows.clear();
+        void saveIpStatsCache(msg.hostname, {
+          updatedAt: msg.updatedAt,
+          meta,
+          rows,
+        });
+        postFullChunks(renderGen);
+      } else if (msg.bootstrap === "http") {
         void bootstrapHttp(msg.hostname, renderGen);
       }
     }
     return;
   }
 
-  if (msg.mode === "delta") {
+  if (msg.mode === "summary") {
+    // 只更新摘要；禁止在此触发 HTTP 全量（压测中会每几百毫秒重拉 3000 行卡死）
+    self.postMessage({ type: "ipStatsUi", action: "summary", meta: { ...meta } });
+    return;
+  }
+
+  if (msg.mode === "window") {
     const upsert = msg.upsert ?? [];
+    rows.clear();
     for (const row of upsert) {
       if (row?.ip) rows.set(row.ip, row);
     }
     void upsertIpStatsCache(msg.hostname, upsert, meta);
     self.postMessage({
       type: "ipStatsUi",
-      action: "patch",
+      action: "window",
       meta: { ...meta },
+      window: msg.window,
       upsert,
     });
+    return;
+  }
+
+  if (msg.mode === "delta") {
+    const upsert = msg.upsert ?? [];
+    if (msg.replaceVisible) {
+      rows.clear();
+    }
+    for (const row of upsert) {
+      if (row?.ip) rows.set(row.ip, row);
+    }
+    void upsertIpStatsCache(msg.hostname, upsert, meta);
+    if (msg.replaceVisible) {
+      postFullChunks(renderGen);
+    } else {
+      self.postMessage({
+        type: "ipStatsUi",
+        action: "patch",
+        meta: { ...meta },
+        upsert,
+      });
+    }
   }
 }
 
@@ -262,17 +339,33 @@ function postFullChunks(gen) {
     meta: { ...meta },
     total: ordered.length,
   });
-  const CHUNK = 80;
-  for (let i = 0; i < ordered.length; i += CHUNK) {
+  const CHUNK = 40;
+  let i = 0;
+  const pump = () => {
     if (gen !== renderGen) return;
+    if (i >= ordered.length) {
+      self.postMessage({
+        type: "ipStatsUi",
+        action: "fullChunk",
+        gen,
+        rows: [],
+        done: true,
+      });
+      return;
+    }
+    const end = Math.min(i + CHUNK, ordered.length);
     self.postMessage({
       type: "ipStatsUi",
       action: "fullChunk",
       gen,
-      rows: ordered.slice(i, i + CHUNK),
-      done: i + CHUNK >= ordered.length,
+      rows: ordered.slice(i, end),
+      done: end >= ordered.length,
     });
-  }
+    i = end;
+    // 让出事件循环，避免一次同步灌 3000 行堵死
+    setTimeout(pump, 0);
+  };
+  pump();
 }
 
 function buildOrdered() {
